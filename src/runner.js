@@ -1,0 +1,748 @@
+import path from "node:path";
+import { loadConfig } from "./config.js";
+import { runCodexTask } from "./codex.js";
+import { evaluateRun } from "./evaluation.js";
+import {
+  answerInputRequestInteractive,
+  applyInputRequestAnswers,
+  createInputRequest,
+  loadInputRequest,
+  requestIsAnswered,
+  saveInputRequest
+} from "./inbox.js";
+import { buildCodexTaskResponseSchema } from "./schemas.js";
+import { redactTaskArtifacts, resolveRuntimeSecrets, storeSecretValue } from "./secrets.js";
+import { resolveSkillsForRun, startupSyncSkills } from "./skills.js";
+import {
+  acquireRunLock,
+  ensureStateLayout,
+  getRunArtifactsDir,
+  loadAgentMemory,
+  loadRunState,
+  releaseRunLock,
+  saveAgentMemory,
+  saveRunState,
+  syncRunArtifact
+} from "./state.js";
+import { deepClone, getNestedValue, makeRunId, nowIso, safeJsonStringify, setNestedValue, writeJson } from "./utils.js";
+import { validateOrThrow } from "./validation.js";
+
+export async function runWorkflowOnce(options = {}) {
+  const config = loadConfig();
+  ensureStateLayout(config);
+  const selectedSkillIds = resolveSelectedSkillIds(config);
+  await startupSyncSkills(config, {
+    fetchRemote: true,
+    requiredSkillIds: collectConfiguredSkillIds(config.workflow, selectedSkillIds)
+  });
+
+  const runId = makeRunId("agent");
+  const selectedSkills = resolveSkillsForRun(config, selectedSkillIds);
+  const runState = createRunState(config, runId, selectedSkills, loadAgentMemory(config));
+  const interactive = options.interactive !== false;
+
+  acquireRunLock(config, runId);
+
+  try {
+    saveRunState(config, runState);
+    syncRunArtifact(config, runState);
+    await executeRun(config, runState, { interactive });
+    return summarizeRun(runState);
+  } finally {
+    releaseRunLock(config, runId);
+  }
+}
+
+export async function resumeWorkflow(runId, options = {}) {
+  const config = loadConfig();
+  ensureStateLayout(config);
+
+  const runState = normalizeRunState(loadRunState(config, runId), loadAgentMemory(config));
+  const interactive = options.interactive !== false;
+  await startupSyncSkills(config, {
+    fetchRemote: true,
+    requiredSkillIds: collectConfiguredSkillIds(runState.workflow, runState.selected_skill_ids)
+  });
+
+  acquireRunLock(config, runId);
+
+  try {
+    await handlePendingInput(config, runState, interactive);
+    if (runState.status === "blocked_waiting_for_input") {
+      return summarizeRun(runState);
+    }
+
+    await executeRun(config, runState, { interactive });
+    return summarizeRun(runState);
+  } finally {
+    releaseRunLock(config, runId);
+  }
+}
+
+function createRunState(config, runId, selectedSkills, agentMemory) {
+  return normalizeRunState({
+    run_id: runId,
+    workflow: deepClone(config.workflow),
+    selected_skill_ids: selectedSkills.map((skill) => skill.id),
+    skill_snapshots: selectedSkills.map((skill) => deepClone(skill)),
+    status: "running",
+    started_at: nowIso(),
+    updated_at: nowIso(),
+    finished_at: null,
+    current_task_index: 0,
+    blocked_task_index: null,
+    pending_input_request_id: null,
+    input_values: {},
+    input_secret_refs: {},
+    persisted_values: {},
+    persisted_secret_refs: {},
+    agent_memory_values: deepClone(agentMemory.values || {}),
+    agent_memory_secret_refs: deepClone(agentMemory.secret_refs || {}),
+    task_attempts: {},
+    task_results: [],
+    state_change_log: [],
+    external_calls: [],
+    evaluation: null,
+    error: null
+  }, agentMemory);
+}
+
+function normalizeRunState(runState, agentMemory = { values: {}, secret_refs: {} }) {
+  return {
+    ...runState,
+    input_values: runState.input_values || {},
+    input_secret_refs: runState.input_secret_refs || {},
+    persisted_values: runState.persisted_values || {},
+    persisted_secret_refs: runState.persisted_secret_refs || {},
+    agent_memory_values: deepClone({
+      ...(runState.agent_memory_values || {}),
+      ...(agentMemory.values || {})
+    }),
+    agent_memory_secret_refs: deepClone({
+      ...(runState.agent_memory_secret_refs || {}),
+      ...(agentMemory.secret_refs || {})
+    }),
+    task_attempts: runState.task_attempts || {},
+    task_results: Array.isArray(runState.task_results) ? runState.task_results : [],
+    state_change_log: Array.isArray(runState.state_change_log) ? runState.state_change_log : [],
+    external_calls: Array.isArray(runState.external_calls) ? runState.external_calls : []
+  };
+}
+
+async function executeRun(config, runState, { interactive }) {
+  const artifactsDir = getRunArtifactsDir(config, runState.run_id);
+  let sawPartial = runState.task_results.some((taskResult) => taskResult.status === "partial");
+
+  for (let taskIndex = runState.current_task_index; taskIndex < runState.workflow.tasks.length; taskIndex += 1) {
+    const task = runState.workflow.tasks[taskIndex];
+    let attempt = Number(runState.task_attempts?.[task.id] || 0) + 1;
+
+    while (true) {
+      runState.task_attempts[task.id] = attempt;
+      const runtimeSecrets = resolveRuntimeSecrets(config, runState);
+      const selectedSkills = selectSkillsForTask(runState, task);
+      const taskContext = buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets);
+      const priorTaskResults = runState.task_results.map((taskResult) => ({
+        task_id: taskResult.task_id,
+        status: taskResult.status,
+        output: taskResult.output,
+        reasoning: taskResult.reasoning
+      }));
+
+      const execution = await runCodexTask({
+        config,
+        runId: runState.run_id,
+        workflow: runState.workflow,
+        task,
+        taskIndex,
+        taskContext,
+        priorTaskResults,
+        skillSnapshots: selectedSkills,
+        artifactsDir,
+        attempt,
+        redactions: runtimeSecrets.redactions
+      });
+
+      if (!execution.parsed) {
+        throw new Error(`Codex did not return a structured response for task ${task.id}.`);
+      }
+
+      validateOrThrow(buildCodexTaskResponseSchema(task), execution.parsed, `Task ${task.id}`);
+
+      if (execution.parsed.status === "blocked_waiting_for_input") {
+        if (!execution.parsed.input_request) {
+          throw new Error(`Task ${task.id} returned blocked_waiting_for_input without input_request.`);
+        }
+
+        const blockedResponse = applyStateChanges({
+          config,
+          runState,
+          task,
+          attempt,
+          response: deepClone(execution.parsed)
+        });
+        const blockedRedactions = {
+          redactions: [...runtimeSecrets.redactions, ...blockedResponse.redactions]
+        };
+        const redactedBlockedResponse = redactTaskArtifacts(blockedResponse.response, blockedRedactions);
+        persistTaskReceipts(runState, task, attempt, redactedBlockedResponse);
+
+        const inputRequest = createInputRequest({
+          runId: runState.run_id,
+          taskId: task.id,
+          skillId: selectedSkills.length === 1 ? selectedSkills[0].id : null,
+          request: execution.parsed.input_request
+        });
+
+        saveInputRequest(config, inputRequest);
+        runState.pending_input_request_id = inputRequest.id;
+        runState.blocked_task_index = taskIndex;
+        runState.current_task_index = taskIndex;
+        runState.status = "blocked_waiting_for_input";
+        runState.evaluation = null;
+        saveRunState(config, runState);
+        syncRunArtifact(config, runState);
+
+        writeJson(path.join(artifactsDir, "tasks", `${String(taskIndex + 1).padStart(2, "0")}-${task.id}`, "task-record.json"), {
+          task_id: task.id,
+          goal: task.goal,
+          status: "blocked_waiting_for_input",
+          input_request_id: inputRequest.id,
+          response: redactedBlockedResponse
+        });
+        writeTaskSideEffectArtifacts(artifactsDir, taskIndex, task.id, redactedBlockedResponse);
+
+        if (interactive && process.stdin.isTTY && process.stdout.isTTY) {
+          const answeredRequest = await answerInputRequestInteractive(config, inputRequest.id);
+          if (!requestIsAnswered(answeredRequest)) {
+            return finalizeRun(config, runState);
+          }
+
+          applyInputRequestAnswers(runState, answeredRequest);
+          runState.pending_input_request_id = null;
+          runState.blocked_task_index = null;
+          runState.status = "running";
+          saveRunState(config, runState);
+          syncRunArtifact(config, runState);
+          attempt += 1;
+          continue;
+        }
+
+        return finalizeRun(config, runState);
+      }
+
+      const guardedResponse = applyTaskGuardrails({
+        config,
+        runState,
+        task,
+        response: deepClone(execution.parsed)
+      });
+
+      validateOrThrow(buildCodexTaskResponseSchema(task), guardedResponse, `Guarded task ${task.id}`);
+
+      const mutatedResponse = applyStateChanges({
+        config,
+        runState,
+        task,
+        attempt,
+        response: guardedResponse
+      });
+      const redactedResponse = redactTaskArtifacts(mutatedResponse.response, {
+        redactions: [...runtimeSecrets.redactions, ...mutatedResponse.redactions]
+      });
+      persistTaskReceipts(runState, task, attempt, redactedResponse);
+      const taskResult = {
+        task_id: task.id,
+        goal: task.goal,
+        status: redactedResponse.status,
+        execution: redactedResponse.execution,
+        journal: redactedResponse.journal,
+        output: redactedResponse.output,
+        reasoning: redactedResponse.reasoning,
+        state_changes: redactedResponse.state_changes,
+        attempt,
+        skill_ids: selectedSkills.map((skill) => skill.id)
+      };
+
+      runState.task_results.push(taskResult);
+      runState.current_task_index = taskIndex + 1;
+      runState.blocked_task_index = null;
+      runState.pending_input_request_id = null;
+      runState.status = "running";
+      saveRunState(config, runState);
+      syncRunArtifact(config, runState);
+
+      writeJson(path.join(artifactsDir, "tasks", `${String(taskIndex + 1).padStart(2, "0")}-${task.id}`, "task-record.json"), taskResult);
+      writeTaskSideEffectArtifacts(artifactsDir, taskIndex, task.id, redactedResponse);
+
+      if (taskResult.status === "failed") {
+        runState.status = "failed";
+        runState.error = `Task failed: ${task.id}`;
+        return finalizeRun(config, runState);
+      }
+
+      if (taskResult.status === "partial") {
+        sawPartial = true;
+      }
+
+      break;
+    }
+  }
+
+  runState.status = sawPartial ? "partial" : "completed";
+  return finalizeRun(config, runState);
+}
+
+async function handlePendingInput(config, runState, interactive) {
+  if (!runState.pending_input_request_id) {
+    return;
+  }
+
+  let request = loadInputRequest(config, runState.pending_input_request_id);
+  if (request.status === "open" && interactive && process.stdin.isTTY && process.stdout.isTTY) {
+    request = await answerInputRequestInteractive(config, request.id);
+  }
+
+  if (!requestIsAnswered(request)) {
+    runState.status = "blocked_waiting_for_input";
+    saveRunState(config, runState);
+    syncRunArtifact(config, runState);
+    return;
+  }
+
+  applyInputRequestAnswers(runState, request);
+  runState.pending_input_request_id = null;
+  runState.blocked_task_index = null;
+  runState.status = "running";
+  saveRunState(config, runState);
+  syncRunArtifact(config, runState);
+}
+
+async function finalizeRun(config, runState) {
+  if (runState.task_results.length > 0) {
+    try {
+      runState.evaluation = await evaluateRun({
+        config,
+        runState: buildEvaluationInput(runState),
+        artifactsDir: getRunArtifactsDir(config, runState.run_id)
+      });
+    } catch (error) {
+      runState.evaluation = {
+        status: runState.status,
+        score: 0,
+        summary: "Evaluation failed to run.",
+        strengths: [],
+        failures: [error.message],
+        risks: [],
+        recommended_changes: ["Inspect evaluation prompt and Codex authentication state."],
+        one_line_assessment: "The workflow ran, but the evaluation step failed."
+      };
+    }
+  }
+
+  if (runState.status !== "blocked_waiting_for_input") {
+    runState.finished_at = nowIso();
+  }
+
+  saveRunState(config, runState);
+  syncRunArtifact(config, runState);
+  return runState;
+}
+
+function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets) {
+  return {
+    workflow: {
+      id: runState.workflow.id,
+      name: runState.workflow.name
+    },
+    global: config.agentContext,
+    inputs: runState.input_values,
+    memory: {
+      run: runState.persisted_values,
+      agent: runState.agent_memory_values
+    },
+    secrets: runtimeSecrets.secrets,
+    task_specific: task.context,
+    selected_skills: selectedSkills.map((skill) => ({
+      id: skill.id,
+      title: skill.title,
+      summary: skill.summary,
+      source: skill.source,
+      metadata: skill.metadata
+    })),
+    transaction_guardrails: isTransactionTask(task) ? buildTransactionGuardrailContext(config, runState) : null,
+    prior_outputs: runState.task_results.map((taskResult) => ({
+      task_id: taskResult.task_id,
+      status: taskResult.status,
+      output: taskResult.output
+    }))
+  };
+}
+
+function selectSkillsForTask(runState, task) {
+  const skillIds = task.skill_ids.length > 0 ? task.skill_ids : runState.selected_skill_ids;
+  return runState.skill_snapshots.filter((skill) => skillIds.includes(skill.id));
+}
+
+function buildEvaluationInput(runState) {
+  return {
+    run_id: runState.run_id,
+    workflow: runState.workflow,
+    selected_skill_ids: runState.selected_skill_ids,
+    input_values: runState.input_values,
+    input_secret_refs: runState.input_secret_refs,
+    persisted_values: runState.persisted_values,
+    persisted_secret_refs: runState.persisted_secret_refs,
+    agent_memory_values: runState.agent_memory_values,
+    agent_memory_secret_refs: runState.agent_memory_secret_refs,
+    skill_snapshots: runState.skill_snapshots.map((skill) => ({
+      id: skill.id,
+      title: skill.title,
+      summary: skill.summary,
+      source: skill.source
+    })),
+    task_results: runState.task_results,
+    state_change_log: runState.state_change_log,
+    external_calls: runState.external_calls,
+    status: runState.status,
+    blocked_task_index: runState.blocked_task_index,
+    pending_input_request_id: runState.pending_input_request_id,
+    error: runState.error
+  };
+}
+
+function summarizeRun(runState) {
+  return {
+    runId: runState.run_id,
+    runStatus: runState.status,
+    pendingInputRequestId: runState.pending_input_request_id,
+    startedAt: runState.started_at,
+    finishedAt: runState.finished_at,
+    tasks: runState.task_results,
+    externalCalls: runState.external_calls,
+    evaluation: runState.evaluation
+  };
+}
+
+export function printRunSummary(result) {
+  return `${safeJsonStringify(result)}\n`;
+}
+
+function applyStateChanges({ config, runState, task, attempt, response }) {
+  const redactions = [];
+  const nextResponse = deepClone(response);
+  const agentMemory = {
+    values: deepClone(runState.agent_memory_values || {}),
+    secret_refs: deepClone(runState.agent_memory_secret_refs || {})
+  };
+  let agentMemoryChanged = false;
+
+  if (!Array.isArray(nextResponse.state_changes) || nextResponse.state_changes.length === 0) {
+    return { response: nextResponse, redactions };
+  }
+
+  const shouldPersist = nextResponse.status !== "failed";
+
+  nextResponse.state_changes = nextResponse.state_changes.map((change) => {
+    const nextChange = { ...change, secret_ref: change.secret_ref ?? null };
+    if (!shouldPersist) {
+      if (nextChange.sensitivity === "secret") {
+        redactions.push(...collectRedactableStrings(parseStateChangeValue(task, nextChange)));
+        return {
+          ...nextChange,
+          value: "[REDACTED]",
+          secret_ref: null
+        };
+      }
+
+      return nextChange;
+    }
+
+    const parsedValue = parseStateChangeValue(task, nextChange);
+    if (nextChange.sensitivity === "secret") {
+      redactions.push(...collectRedactableStrings(parsedValue));
+      const secretRef = storeStateChangeSecret(config, {
+        runId: runState.run_id,
+        taskId: task.id,
+        change: nextChange,
+        value: parsedValue
+      });
+
+      if (nextChange.scope === "agent") {
+        setNestedValue(agentMemory.secret_refs, nextChange.key, secretRef);
+        agentMemoryChanged = true;
+      } else {
+        setNestedValue(runState.persisted_secret_refs, nextChange.key, secretRef);
+      }
+
+      return {
+        ...nextChange,
+        value: "[REDACTED]",
+        secret_ref: secretRef
+      };
+    }
+
+    if (nextChange.scope === "agent") {
+      setNestedValue(agentMemory.values, nextChange.key, parsedValue);
+      agentMemoryChanged = true;
+    } else {
+      setNestedValue(runState.persisted_values, nextChange.key, parsedValue);
+    }
+
+    return {
+      ...nextChange,
+      secret_ref: null
+    };
+  });
+
+  if (shouldPersist) {
+    runState.agent_memory_values = agentMemory.values;
+    runState.agent_memory_secret_refs = agentMemory.secret_refs;
+    if (agentMemoryChanged) {
+      saveAgentMemory(config, agentMemory);
+    }
+  }
+
+  return { response: nextResponse, redactions };
+}
+
+function persistTaskReceipts(runState, task, attempt, response) {
+  const recordedAt = nowIso();
+
+  if (Array.isArray(response.execution?.external_calls) && response.execution.external_calls.length > 0) {
+    runState.external_calls.push(...response.execution.external_calls.map((call) => ({
+      ...call,
+      task_id: task.id,
+      attempt,
+      recorded_at: recordedAt
+    })));
+  }
+
+  if (Array.isArray(response.state_changes) && response.state_changes.length > 0) {
+    runState.state_change_log.push(...response.state_changes.map((change) => ({
+      ...change,
+      task_id: task.id,
+      attempt,
+      recorded_at: recordedAt
+    })));
+  }
+}
+
+function writeTaskSideEffectArtifacts(artifactsDir, taskIndex, taskId, response) {
+  const taskDir = path.join(artifactsDir, "tasks", `${String(taskIndex + 1).padStart(2, "0")}-${taskId}`);
+  writeJson(path.join(taskDir, "external-calls.json"), response.execution?.external_calls || []);
+  writeJson(path.join(taskDir, "state-changes.json"), response.state_changes || []);
+}
+
+function isTransactionTask(task) {
+  return /transaction/i.test(task.id) || /make transactions/i.test(task.goal);
+}
+
+function buildTransactionGuardrailContext(config, runState) {
+  return {
+    ...deepClone(config.transactionGuardrails),
+    approval: {
+      required: config.transactionGuardrails.requireHumanApproval,
+      granted: hasTransactionApproval(config, runState),
+      approval_path: "transaction_approval.approved",
+      approval_notes_path: "transaction_approval.notes"
+    }
+  };
+}
+
+function hasTransactionApproval(config, runState) {
+  const inputApproval = getNestedValue(runState.input_values, "transaction_approval.approved");
+  if (typeof inputApproval === "boolean") {
+    return inputApproval;
+  }
+
+  const configuredApproval = getNestedValue(config.agentContext, "transaction_approval.approved");
+  return configuredApproval === true;
+}
+
+function applyTaskGuardrails({ config, runState, task, response }) {
+  if (!isTransactionTask(task)) {
+    return response;
+  }
+
+  const guardrails = buildTransactionGuardrailContext(config, runState);
+  const violations = collectTransactionGuardrailViolations(response, guardrails);
+
+  if (violations.length === 0) {
+    return response;
+  }
+
+  const note = `Transaction guardrails blocked the task: ${violations.join(" | ")}`;
+  return {
+    ...response,
+    status: "failed",
+    execution: {
+      ...response.execution,
+      summary: joinSentences(response.execution.summary, note),
+      actions_taken: [
+        ...response.execution.actions_taken,
+        {
+          type: "guardrail_violation",
+          summary: note
+        }
+      ]
+    },
+    journal: {
+      ...response.journal,
+      summary: joinSentences(response.journal.summary, "Transaction guardrails rejected the proposed execution output."),
+      events: [
+        ...response.journal.events,
+        ...violations.map((message) => ({
+          kind: "warning",
+          message,
+          timestamp: nowIso(),
+          data: "transaction_guardrails"
+        }))
+      ],
+      conclusions: [
+        ...response.journal.conclusions,
+        "The execution output violated transaction guardrails and was rejected."
+      ]
+    },
+    output: appendGuardrailNotesToOutput(response.output, violations, note),
+    reasoning: "Transaction guardrails rejected the proposed actions because they violated execution policy."
+  };
+}
+
+function collectTransactionGuardrailViolations(response, guardrails) {
+  const violations = [];
+  const actions = Array.isArray(response.output?.actions) ? response.output.actions : [];
+  const liveStatuses = new Set(guardrails.liveStatuses.map(normalizePolicyToken));
+  const allowedAssets = new Set(guardrails.allowedAssets.map(normalizePolicyToken));
+  const blockedAssets = new Set(guardrails.blockedAssets.map(normalizePolicyToken));
+  const allowedActionTypes = new Set(guardrails.allowedActionTypes.map(normalizePolicyToken));
+  const blockedActionTypes = new Set(guardrails.blockedActionTypes.map(normalizePolicyToken));
+
+  if (!Array.isArray(response.output?.safeguards) || response.output.safeguards.length === 0) {
+    violations.push("At least one safeguard must be reported for transaction tasks.");
+  }
+
+  if (actions.length > guardrails.maxActions) {
+    violations.push(`Proposed ${actions.length} actions, exceeding the limit of ${guardrails.maxActions}.`);
+  }
+
+  for (const action of actions) {
+    const actionType = normalizePolicyToken(action.type);
+    const asset = normalizePolicyToken(action.asset);
+    const status = normalizePolicyToken(action.status);
+    const hasTxHash = typeof action.tx_hash === "string" && action.tx_hash.trim().length > 0;
+    const isLiveAction = liveStatuses.has(status) || hasTxHash;
+
+    if (allowedActionTypes.size > 0 && actionType && !allowedActionTypes.has(actionType)) {
+      violations.push(`Action type ${action.type} is not allowed by policy.`);
+    }
+
+    if (blockedActionTypes.has(actionType)) {
+      violations.push(`Action type ${action.type} is explicitly blocked by policy.`);
+    }
+
+    if (asset && allowedAssets.size > 0 && !allowedAssets.has(asset)) {
+      violations.push(`Asset ${action.asset} is outside the allowlist.`);
+    }
+
+    if (asset && blockedAssets.has(asset)) {
+      violations.push(`Asset ${action.asset} is blocked by policy.`);
+    }
+
+    if (guardrails.maxAmountPerAction !== null && Number.isFinite(action.amount) && action.amount > guardrails.maxAmountPerAction) {
+      violations.push(`Action amount ${action.amount} exceeds the per-action limit of ${guardrails.maxAmountPerAction}.`);
+    }
+
+    if (guardrails.mode !== "live" && isLiveAction) {
+      violations.push(`Live transaction status ${action.status} is not allowed while execution mode is ${guardrails.mode}.`);
+    }
+
+    if (isLiveAction && guardrails.approval.required && !guardrails.approval.granted) {
+      violations.push(`Live action ${action.type} requires explicit human approval before execution.`);
+    }
+
+    if (liveStatuses.has(status) && !hasTxHash) {
+      violations.push(`Action ${action.type} reported live status ${action.status} without a transaction hash.`);
+    }
+  }
+
+  return [...new Set(violations)];
+}
+
+function normalizePolicyToken(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function joinSentences(...parts) {
+  return parts
+    .filter((part) => typeof part === "string" && part.trim().length > 0)
+    .join(" ")
+    .trim();
+}
+
+function appendGuardrailNotesToOutput(output, violations, note) {
+  const nextOutput = { ...output };
+
+  if (Array.isArray(output?.safeguards)) {
+    nextOutput.safeguards = [...output.safeguards, ...violations];
+  }
+
+  if (Array.isArray(output?.notes)) {
+    nextOutput.notes = [...output.notes, note];
+  }
+
+  return nextOutput;
+}
+
+function collectConfiguredSkillIds(workflow, additionalSkillIds = []) {
+  const workflowTaskSkillIds = workflow.tasks.flatMap((task) => task.skill_ids || []);
+  return [...new Set([
+    ...(workflow.default_skill_ids || []),
+    ...workflowTaskSkillIds,
+    ...(additionalSkillIds || [])
+  ])];
+}
+
+function resolveSelectedSkillIds(config) {
+  return config.workflow.default_skill_ids.length > 0
+    ? config.workflow.default_skill_ids
+    : config.defaultSkillIds;
+}
+
+function parseStateChangeValue(task, change) {
+  if (change.format === "json") {
+    try {
+      return JSON.parse(change.value);
+    } catch (error) {
+      throw new Error(`Task ${task.id} returned invalid JSON for state_changes key ${change.key}: ${error.message}`);
+    }
+  }
+
+  return change.value;
+}
+
+function storeStateChangeSecret(config, { runId, taskId, change, value }) {
+  return storeSecretValue(config, {
+    value,
+    key: change.key,
+    label: change.summary,
+    runId,
+    taskId
+  });
+}
+
+function collectRedactableStrings(value) {
+  if (typeof value === "string") {
+    return value.trim().length > 0 ? [value] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectRedactableStrings(item));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.values(value).flatMap((nestedValue) => collectRedactableStrings(nestedValue));
+  }
+
+  return [];
+}

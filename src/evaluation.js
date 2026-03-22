@@ -36,7 +36,7 @@ function buildEvaluationPrompt(runState) {
     "- Keep one_line_assessment to one sentence.",
     "",
     "Run State JSON:",
-    JSON.stringify(runState, null, 2),
+    JSON.stringify(runState),
     ""
   ].join("\n");
 }

@@ -210,6 +210,36 @@ function buildCodexArgs(config, schemaPath) {
   return args;
 }
 
+const SKILL_MARKDOWN_MAX_CHARS = 2000;
+const PRIOR_OUTPUT_MAX_CHARS = 300;
+
+function truncate(text, maxChars) {
+  if (typeof text !== "string") {
+    return "";
+  }
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}\n... [truncated, ${text.length - maxChars} chars omitted]`;
+}
+
+function summarizePriorResults(priorTaskResults) {
+  if (!Array.isArray(priorTaskResults) || priorTaskResults.length === 0) {
+    return "[]";
+  }
+  const summarized = priorTaskResults.map((result) => {
+    const outputStr = typeof result.output === "string"
+      ? result.output
+      : safeJsonStringify(result.output);
+    return {
+      task_id: result.task_id,
+      status: result.status,
+      output_summary: truncate(outputStr, PRIOR_OUTPUT_MAX_CHARS)
+    };
+  });
+  return JSON.stringify(summarized);
+}
+
 function buildTaskPrompt({
   runId,
   workflow,
@@ -224,11 +254,12 @@ function buildTaskPrompt({
         .map((skill) => [
           `Skill ID: ${skill.id}`,
           `Skill Title: ${skill.title}`,
+          skill.summary ? `Skill Summary: ${skill.summary}` : null,
           "Skill Metadata JSON:",
           safeJsonStringify(skill.metadata),
           "Skill Markdown:",
-          skill.raw_markdown
-        ].join("\n"))
+          truncate(skill.raw_markdown, SKILL_MARKDOWN_MAX_CHARS)
+        ].filter(Boolean).join("\n"))
         .join("\n\n---\n\n")
     : "No skills selected for this task.";
 
@@ -317,10 +348,10 @@ function buildTaskPrompt({
     skillBlocks,
     "",
     "Task Context JSON:",
-    safeJsonStringify(taskContext),
+    JSON.stringify(taskContext),
     "",
     "Prior Task Results JSON:",
-    safeJsonStringify(priorTaskResults),
+    summarizePriorResults(priorTaskResults),
     ""
   ].join("\n");
 }

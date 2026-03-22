@@ -27,7 +27,7 @@ import {
 import { deepClone, getNestedValue, makeRunId, nowIso, safeJsonStringify, setNestedValue, writeJson } from "./utils.js";
 import { validateOrThrow } from "./validation.js";
 
-const MAX_OPERATION_ROUNDS_PER_TASK = 50;
+const MAX_OPERATION_ROUNDS_PER_TASK = 10;
 const MAX_REPEATED_OPERATION_BATCHES = 3;
 
 export async function runWorkflowOnce(options = {}) {
@@ -213,8 +213,7 @@ async function executeRun(config, runState, { interactive }) {
       const priorTaskResults = runState.task_results.map((taskResult) => ({
         task_id: taskResult.task_id,
         status: taskResult.status,
-        output: taskResult.output,
-        reasoning: taskResult.reasoning
+        output: taskResult.output
       }));
 
       const execution = await runCodexTask({
@@ -586,6 +585,10 @@ async function finalizeRun(config, runState) {
 }
 
 function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets) {
+  const allOperationResults = runState.task_operation_results[task.id] || [];
+  const latestOperationResults = allOperationResults.length > 5
+    ? allOperationResults.slice(-5)
+    : allOperationResults;
   return {
     workflow: {
       id: runState.workflow.id,
@@ -600,24 +603,18 @@ function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets
     secrets: runtimeSecrets.secrets,
     task_specific: task.context,
     task_controls: {
-      continue_on_blocked: task.continue_on_blocked === true,
-      preflight_checks: task.preflight_checks || []
+      continue_on_blocked: task.continue_on_blocked === true
     },
-    operation_results: runState.task_operation_results[task.id] || [],
+    operation_results: latestOperationResults,
     task_checkpoint: runState.task_checkpoints[task.id] || { entries: [] },
-    workflow_diagnostics: runState.workflow_diagnostics,
     selected_skills: selectedSkills.map((skill) => ({
       id: skill.id,
-      title: skill.title,
-      summary: skill.summary,
-      source: skill.source,
-      metadata: skill.metadata
+      title: skill.title
     })),
     transaction_guardrails: isTransactionTask(task) ? buildTransactionGuardrailContext(config, runState) : null,
     prior_outputs: runState.task_results.map((taskResult) => ({
       task_id: taskResult.task_id,
-      status: taskResult.status,
-      output: taskResult.output
+      status: taskResult.status
     }))
   };
 }
@@ -708,26 +705,21 @@ function selectSkillsForTask(runState, task) {
 function buildEvaluationInput(runState) {
   return {
     run_id: runState.run_id,
-    workflow: runState.workflow,
+    workflow: {
+      id: runState.workflow.id,
+      name: runState.workflow.name
+    },
     selected_skill_ids: runState.selected_skill_ids,
-    input_values: runState.input_values,
-    input_secret_refs: runState.input_secret_refs,
-    persisted_values: runState.persisted_values,
-    persisted_secret_refs: runState.persisted_secret_refs,
-    agent_memory_values: runState.agent_memory_values,
-    agent_memory_secret_refs: runState.agent_memory_secret_refs,
-    skill_snapshots: runState.skill_snapshots.map((skill) => ({
-      id: skill.id,
-      title: skill.title,
-      summary: skill.summary,
-      source: skill.source
+    task_results: runState.task_results.map((result) => ({
+      task_id: result.task_id,
+      goal: result.goal,
+      status: result.status,
+      reasoning: result.reasoning,
+      output: result.output,
+      attempt: result.attempt
     })),
-    task_results: runState.task_results,
     state_change_log: runState.state_change_log,
     external_calls: runState.external_calls,
-    task_operation_results: runState.task_operation_results,
-    task_checkpoints: runState.task_checkpoints,
-    workflow_diagnostics: runState.workflow_diagnostics,
     status: runState.status,
     blocked_task_index: runState.blocked_task_index,
     pending_input_request_id: runState.pending_input_request_id,

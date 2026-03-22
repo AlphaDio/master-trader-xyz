@@ -586,9 +586,18 @@ async function finalizeRun(config, runState) {
 
 function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets) {
   const allOperationResults = runState.task_operation_results[task.id] || [];
-  const latestOperationResults = allOperationResults.length > 5
-    ? allOperationResults.slice(-5)
-    : allOperationResults;
+  let operationResults;
+  if (allOperationResults.length > 5) {
+    const olderResults = allOperationResults.slice(0, -5).map((result) => ({
+      id: result.id,
+      ok: result.ok,
+      status: result.status,
+      target: result.target
+    }));
+    operationResults = [...olderResults, ...allOperationResults.slice(-5)];
+  } else {
+    operationResults = allOperationResults;
+  }
   return {
     workflow: {
       id: runState.workflow.id,
@@ -605,7 +614,7 @@ function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets
     task_controls: {
       continue_on_blocked: task.continue_on_blocked === true
     },
-    operation_results: latestOperationResults,
+    operation_results: operationResults,
     task_checkpoint: runState.task_checkpoints[task.id] || { entries: [] },
     selected_skills: selectedSkills.map((skill) => ({
       id: skill.id,

@@ -217,10 +217,30 @@ function truncate(text, maxChars) {
   if (typeof text !== "string") {
     return "";
   }
+  if (typeof maxChars !== "number" || maxChars <= 0) {
+    return "";
+  }
   if (text.length <= maxChars) {
     return text;
   }
-  return `${text.slice(0, maxChars)}\n... [truncated, ${text.length - maxChars} chars omitted]`;
+
+  const initialOmitted = text.length - maxChars;
+  let footer = `\n... [truncated, ${initialOmitted} chars omitted]`;
+
+  if (footer.length >= maxChars) {
+    return text.slice(0, maxChars);
+  }
+
+  const availableForText = maxChars - footer.length;
+  const visible = text.slice(0, availableForText);
+  const finalOmitted = text.length - visible.length;
+  footer = `\n... [truncated, ${finalOmitted} chars omitted]`;
+
+  if (visible.length + footer.length > maxChars) {
+    footer = footer.slice(0, maxChars - visible.length);
+  }
+
+  return visible + footer;
 }
 
 function summarizePriorResults(priorTaskResults) {
@@ -228,9 +248,16 @@ function summarizePriorResults(priorTaskResults) {
     return [];
   }
   return priorTaskResults.map((result) => {
-    const outputStr = typeof result.output === "string"
+    let outputStr = typeof result.output === "string"
       ? result.output
       : safeJsonStringify(result.output);
+    if (typeof result.output !== "string" && typeof outputStr === "string") {
+      try {
+        outputStr = JSON.stringify(JSON.parse(outputStr));
+      } catch {
+        outputStr = outputStr.replace(/\s+/g, " ").trim();
+      }
+    }
     return {
       task_id: result.task_id,
       status: result.status,
@@ -255,7 +282,7 @@ function buildTaskPrompt({
           `Skill Title: ${skill.title}`,
           skill.summary ? `Skill Summary: ${skill.summary}` : null,
           "Skill Metadata JSON:",
-          safeJsonStringify(skill.metadata),
+          JSON.stringify(skill.metadata),
           "Skill Markdown:",
           truncate(skill.raw_markdown, SKILL_MARKDOWN_MAX_CHARS)
         ].filter(Boolean).join("\n"))

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Master Trader XYZ</title>
+    <meta
+      name="description"
+      content="Master Trader XYZ is a Codex-driven agent that researches markets, coordinates with its human, and proposes guarded execution plans on Base."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <div class="hero__art">
+          <img
+            class="hero__image"
+            src="./agent-avatar.svg"
+            alt="Master Trader XYZ agent avatar"
+            width="960"
+            height="960"
+          />
+        </div>
+        <div>
+          <div class="eyebrow">Autonomous Base Market Agent</div>
+          <h1>Master Trader XYZ</h1>
+          <p class="hero__lede">
+            A Codex-driven agent built to research crypto markets on Base, coordinate with its human
+            operator, and propose guarded execution plans with durable state, audit logs, and structured workflows.
+          </p>
+          <div class="hero__meta">
+            <span>Harness: codex-cli</span>
+            <span>Model: gpt-5.4-mini</span>
+            <span>Network: Base</span>
+          </div>
+          <div class="hero__actions">
+            <a class="button button--primary" href="https://github.com/" target="_blank" rel="noreferrer">View Repository</a>
+            <a class="button button--ghost" href="https://synthesis.devfolio.co/skill.md" target="_blank" rel="noreferrer">Synthesis Skill</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="grid" aria-label="Agent highlights">
+        <article class="card">
+          <h2>Guarded by Design</h2>
+          <p>
+            Execution tasks are wrapped in transaction guardrails, operator approval hooks, and a harness that records
+            structured outputs instead of trusting free-form model text.
+          </p>
+        </article>
+        <article class="card">
+          <h2>Stateful and Auditable</h2>
+          <p>
+            The agent persists run state, inbox requests, skill integrations, secret references, and immutable artifacts
+            so every attempt can be resumed, inspected, and evaluated.
+          </p>
+        </article>
+        <article class="card">
+          <h2>Built for Human Collaboration</h2>
+          <p>
+            When information is missing, Master Trader XYZ blocks cleanly, asks only for the minimum input, and resumes
+            with durable memory instead of restarting from scratch.
+          </p>
+        </article>
+      </section>
+
+      <section class="columns">
+        <section class="section">
+          <h2>What It Does</h2>
+          <ul>
+            <li>Collects market context and price signals from Base-related sources.</li>
+            <li>Analyzes portfolio state and proposes next actions in structured JSON.</li>
+            <li>Enforces execution guardrails before any live transaction is accepted.</li>
+            <li>Supports dedicated contest tasks such as Synthesis registration without polluting trading tasks.</li>
+          </ul>
+        </section>
+        <section class="section">
+          <h2>Current Operating Posture</h2>
+          <p class="status">Dry-run execution mode enabled</p>
+          <p>
+            The current default posture favors safe analysis, reproducible logs, and explicit human approval over blind automation.
+          </p>
+        </section>
+      </section>
+
+      <section class="section">
+        <h2>Run the Agent</h2>
+        <p>
+          This project is designed to run locally as a Codex-powered CLI harness. To launch the Synthesis registration workflow,
+          set the workflow config and start a run:
+        </p>
+        <div class="terminal">
+          <code>$env:DEFAULT_SKILL_IDS="synthesis"
+$env:WORKFLOW_CONFIG_JSON=Get-Content .\examples\synthesis-entry-workflow.json -Raw
+node .\src\index.js run-once</code>
+        </div>
+      </section>
+
+      <p class="footer">
+        GitHub Pages-ready static site for Master Trader XYZ. Enable Pages from the repository and serve the <code>docs/</code> folder.
+      </p>
+    </main>
+  </body>
+</html>

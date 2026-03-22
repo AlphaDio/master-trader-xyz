@@ -225,9 +225,9 @@ function truncate(text, maxChars) {
 
 function summarizePriorResults(priorTaskResults) {
   if (!Array.isArray(priorTaskResults) || priorTaskResults.length === 0) {
-    return "[]";
+    return [];
   }
-  const summarized = priorTaskResults.map((result) => {
+  return priorTaskResults.map((result) => {
     const outputStr = typeof result.output === "string"
       ? result.output
       : safeJsonStringify(result.output);
@@ -237,7 +237,6 @@ function summarizePriorResults(priorTaskResults) {
       output_summary: truncate(outputStr, PRIOR_OUTPUT_MAX_CHARS)
     };
   });
-  return JSON.stringify(summarized);
 }
 
 function buildTaskPrompt({
@@ -351,7 +350,7 @@ function buildTaskPrompt({
     JSON.stringify(taskContext),
     "",
     "Prior Task Results JSON:",
-    summarizePriorResults(priorTaskResults),
+    JSON.stringify(summarizePriorResults(priorTaskResults)),
     ""
   ].join("\n");
 }

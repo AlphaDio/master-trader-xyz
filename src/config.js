@@ -21,7 +21,7 @@ const defaultAgentContext = {
     description: "A Codex-driven agent that researches markets, coordinates with its human, and proposes guarded execution plans.",
     image: "",
     agentHarness: "codex-cli",
-    model: "gpt-5"
+    model: "gpt-5.4-mini"
   }
 };
 const defaultSkillUrls = ["https://synthesis.devfolio.co/skill.md"];
@@ -54,6 +54,11 @@ export function loadConfig() {
 
   if (!Number.isInteger(transactionGuardrails.maxActions) || transactionGuardrails.maxActions < 0) {
     throw new Error("TRANSACTION_MAX_ACTIONS must be a non-negative integer.");
+  }
+
+  const codexTaskTimeoutMs = readNumberEnv("CODEX_TASK_TIMEOUT_MS", 300000);
+  if (!Number.isInteger(codexTaskTimeoutMs) || codexTaskTimeoutMs <= 0) {
+    throw new Error("CODEX_TASK_TIMEOUT_MS must be a positive integer.");
   }
 
   return {
@@ -89,7 +94,8 @@ export function loadConfig() {
       workdir: path.resolve(projectRoot, process.env.CODEX_WORKDIR || "."),
       enableWebSearch: (process.env.CODEX_ENABLE_WEB_SEARCH || "true").toLowerCase() === "true",
       dangerousBypass: (process.env.CODEX_DANGEROUS_BYPASS || "false").toLowerCase() === "true",
-      sandboxMode: process.env.CODEX_SANDBOX_MODE || "workspace-write"
+      sandboxMode: process.env.CODEX_SANDBOX_MODE || "workspace-write",
+      taskTimeoutMs: codexTaskTimeoutMs
     }
   };
 }

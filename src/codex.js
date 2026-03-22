@@ -1,7 +1,10 @@
+import fs from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { buildCodexTaskResponseSchema } from "./schemas.js";
-import { ensureDir, redactValue, safeJsonStringify, writeJson, writeText } from "./utils.js";
+import { ensureDir, nowIso, redactValue, safeJsonStringify, writeJson, writeText } from "./utils.js";
+
+const MAX_COMMAND_EVENTS_BEFORE_ABORT = 8;
 
 export async function runCodexTask({
   config,
@@ -48,15 +51,80 @@ export async function runCodexStructured({
   ensureDir(artifactDir);
 
   const schemaPath = path.join(artifactDir, `${artifactPrefix}-schema.json`);
+  const promptPath = path.join(artifactDir, `${artifactPrefix}-prompt.txt`);
+  const stdoutPath = path.join(artifactDir, `${artifactPrefix}-stdout.log`);
+  const stderrPath = path.join(artifactDir, `${artifactPrefix}-stderr.log`);
+  const eventsJsonlPath = path.join(artifactDir, `${artifactPrefix}-events.jsonl`);
+  const eventsJsonPath = path.join(artifactDir, `${artifactPrefix}-events.json`);
+  const lastMessagePath = path.join(artifactDir, `${artifactPrefix}-last-message.json`);
+  const executionPath = path.join(artifactDir, `${artifactPrefix}-execution.json`);
+
   writeJson(schemaPath, schema);
+  writeText(promptPath, redactPrompt(prompt, redactions));
+  writeText(stdoutPath, "");
+  writeText(stderrPath, "");
+  writeText(eventsJsonlPath, "");
 
   const args = buildCodexArgs(config, schemaPath);
-  const result = await spawnWithInput({
+  const startedAt = nowIso();
+  const executionState = {
+    status: "running",
+    started_at: startedAt,
     command: config.codex.bin,
     args,
-    input: prompt,
-    cwd: config.codex.workdir
-  });
+    pid: null,
+    timeout_ms: config.codex.taskTimeoutMs,
+    stdout_bytes: 0,
+    stderr_bytes: 0,
+    last_output_at: null,
+    abort_reason: null
+  };
+  writeExecutionState(executionPath, executionState);
+
+  let result;
+  try {
+    result = await spawnWithInput({
+      command: config.codex.bin,
+      args,
+      input: prompt,
+      cwd: config.codex.workdir,
+      timeoutMs: config.codex.taskTimeoutMs,
+      onSpawn: (child) => {
+        executionState.pid = child.pid || null;
+        writeExecutionState(executionPath, executionState);
+      },
+      onStdout: (chunkText) => {
+        const redactedChunk = redactPrompt(chunkText, redactions);
+        fs.appendFileSync(stdoutPath, redactedChunk, "utf8");
+        executionState.stdout_bytes += Buffer.byteLength(chunkText);
+        executionState.last_output_at = nowIso();
+        writeExecutionState(executionPath, executionState);
+      },
+      onStderr: (chunkText) => {
+        const redactedChunk = redactPrompt(chunkText, redactions);
+        fs.appendFileSync(stderrPath, redactedChunk, "utf8");
+        executionState.stderr_bytes += Buffer.byteLength(chunkText);
+        executionState.last_output_at = nowIso();
+        writeExecutionState(executionPath, executionState);
+      },
+      onEvent: (event) => {
+        fs.appendFileSync(eventsJsonlPath, `${safeJsonStringify(redactValue(event, redactions))}\n`, "utf8");
+      },
+      onAbort: (reason) => {
+        executionState.abort_reason = reason;
+        executionState.last_output_at = nowIso();
+        writeExecutionState(executionPath, executionState);
+      }
+    });
+  } catch (error) {
+    writeExecutionState(executionPath, {
+      ...executionState,
+      status: "failed",
+      finished_at: nowIso(),
+      error: error.message
+    });
+    throw error;
+  }
 
   const eventLines = `${result.stdout}\n${result.stderr}`
     .split(/\r?\n/)
@@ -86,16 +154,28 @@ export async function runCodexStructured({
   const parsed = lastAgentMessage ? JSON.parse(lastAgentMessage) : null;
   const redactedParsed = parsed ? redactValue(parsed, redactions) : null;
 
-  writeText(path.join(artifactDir, `${artifactPrefix}-prompt.txt`), redactPrompt(prompt, redactions));
-  writeText(path.join(artifactDir, `${artifactPrefix}-stdout.log`), redactPrompt(result.stdout, redactions));
-  writeText(path.join(artifactDir, `${artifactPrefix}-stderr.log`), redactPrompt(result.stderr, redactions));
-  writeJson(path.join(artifactDir, `${artifactPrefix}-events.json`), redactValue(events, redactions));
-  writeJson(path.join(artifactDir, `${artifactPrefix}-last-message.json`), redactedParsed);
+  writeJson(eventsJsonPath, redactValue(events, redactions));
+  writeJson(lastMessagePath, redactedParsed);
+  writeExecutionState(executionPath, {
+    ...executionState,
+    status: result.abortedForExploration ? "aborted" : result.timedOut ? "timed_out" : "completed",
+    started_at: startedAt,
+    command: config.codex.bin,
+    args,
+    exit_code: result.exitCode,
+    timed_out: result.timedOut === true,
+    aborted_for_exploration: result.abortedForExploration === true,
+    abort_reason: result.abortReason || executionState.abort_reason,
+    finished_at: nowIso()
+  });
 
   return {
-    stdout: redactPrompt(result.stdout, redactions),
-    stderr: redactPrompt(result.stderr, redactions),
+    stdout: result.stdout,
+    stderr: result.stderr,
     exitCode: result.exitCode,
+    timedOut: result.timedOut === true,
+    abortedForExploration: result.abortedForExploration === true,
+    abortReason: result.abortReason || null,
     parsed,
     redactedParsed
   };
@@ -176,6 +256,10 @@ function buildTaskPrompt({
     "",
     "Rules:",
     "- Use the provided context, skills, URLs, and secrets as task inputs.",
+    "- Treat the provided task context and memory as authoritative unless the task explicitly requires new local inspection.",
+    "- Do not explore the repository or enumerate workspace files unless the task explicitly requires a named local file or artifact.",
+    "- Do not run broad discovery commands such as `rg --files`, `Get-ChildItem`, or recursive scans unless they are strictly necessary for the task output.",
+    "- Prefer returning a best-effort structured result over open-ended exploration.",
     "- If you can complete the task, return status completed, partial, or failed.",
     "- If you cannot proceed because you need human-provided data, return status blocked_waiting_for_input.",
     "- input_request must always be present. Use {\"prompt\":\"\",\"fields\":[]} when no human input is needed.",
@@ -202,31 +286,95 @@ function buildTaskPrompt({
   ].join("\n");
 }
 
-function spawnWithInput({ command, args, input, cwd }) {
+function spawnWithInput({ command, args, input, cwd, timeoutMs, onSpawn, onStdout, onStderr, onEvent, onAbort }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32",
+      detached: process.platform !== "win32",
       windowsHide: true
     });
+    onSpawn?.(child);
 
     let stdout = "";
     let stderr = "";
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let timedOut = false;
+    let abortedForExploration = false;
+    let abortReason = null;
+    let timeoutId = null;
+    const explorationState = {
+      commandEvents: 0,
+      sawAgentMessage: false
+    };
+
+    const processEventLines = (streamName) => {
+      const isStdout = streamName === "stdout";
+      const buffer = isStdout ? stdoutBuffer : stderrBuffer;
+      const lines = buffer.split(/\r?\n/);
+      const trailing = lines.pop() || "";
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith("{")) {
+          continue;
+        }
+
+        try {
+          const event = JSON.parse(line);
+          onEvent?.(event);
+          if (shouldAbortForExploration(event, explorationState)) {
+            abortedForExploration = true;
+            abortReason = `Aborted after ${explorationState.commandEvents} command events without a meaningful agent response.`;
+            onAbort?.(abortReason);
+            void terminateProcessTree(child);
+          }
+        } catch {
+          // Ignore non-JSON lines in the live stream.
+        }
+      }
+
+      if (isStdout) {
+        stdoutBuffer = trailing;
+      } else {
+        stderrBuffer = trailing;
+      }
+    };
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      const chunkText = chunk.toString();
+      stdout += chunkText;
+      stdoutBuffer += chunkText;
+      onStdout?.(chunkText);
+      processEventLines("stdout");
     });
 
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      const chunkText = chunk.toString();
+      stderr += chunkText;
+      stderrBuffer += chunkText;
+      onStderr?.(chunkText);
+      processEventLines("stderr");
     });
 
     child.on("error", reject);
 
     child.on("close", (exitCode) => {
-      resolve({ exitCode, stdout, stderr });
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+
+      resolve({ exitCode, stdout, stderr, timedOut, abortedForExploration, abortReason });
     });
+
+    if (Number.isInteger(timeoutMs) && timeoutMs > 0) {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        void terminateProcessTree(child);
+      }, timeoutMs);
+    }
 
     child.stdin.write(input);
     child.stdin.end();
@@ -235,4 +383,85 @@ function spawnWithInput({ command, args, input, cwd }) {
 
 function redactPrompt(text, redactions) {
   return redactValue(text, redactions);
+}
+
+function writeExecutionState(filePath, executionState) {
+  writeJson(filePath, executionState);
+}
+
+function shouldAbortForExploration(event, explorationState) {
+  if (event.type === "item.completed" && event.item?.type === "agent_message") {
+    explorationState.sawAgentMessage = true;
+  }
+
+  if (explorationState.sawAgentMessage) {
+    return false;
+  }
+
+  if (event.item?.type === "command_execution" && (event.type === "item.started" || event.type === "item.completed")) {
+    explorationState.commandEvents += 1;
+  }
+
+  return explorationState.commandEvents > MAX_COMMAND_EVENTS_BEFORE_ABORT;
+}
+
+function terminateProcessTree(child) {
+  return process.platform === "win32"
+    ? terminateWindowsProcessTree(child.pid)
+    : terminatePosixProcessTree(child.pid);
+}
+
+function terminateWindowsProcessTree(pid) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(pid) || pid <= 0) {
+      resolve();
+      return;
+    }
+
+    const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true
+    });
+
+    killer.on("error", () => {
+      resolve();
+    });
+
+    killer.on("close", () => {
+      resolve();
+    });
+  });
+}
+
+function terminatePosixProcessTree(pid) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(pid) || pid <= 0) {
+      resolve();
+      return;
+    }
+
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        resolve();
+        return;
+      }
+    }
+
+    setTimeout(() => {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Ignore best-effort kill failures.
+        }
+      }
+      resolve();
+    }, 1000);
+  });
 }

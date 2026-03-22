@@ -108,6 +108,8 @@ Recommended operator setup:
 3. Keep `TRANSACTION_EXECUTION_MODE=dry-run` while registering and preparing the submission.
 4. Use the ready-made workflow in [`examples/synthesis-entry-workflow.json`](./examples/synthesis-entry-workflow.json) by loading it into `WORKFLOW_CONFIG_JSON`.
 
+If you want registration to coexist with the trading workflow, use [`examples/synthesis-trader-workflow.json`](./examples/synthesis-trader-workflow.json). It gives `synthesis` only to the registration task and keeps the market-analysis, execution, and evaluation tasks free of default skills.
+
 Example PowerShell flow:
 
 ```powershell
@@ -157,6 +159,18 @@ Use `skills remove <skill-id>` to exclude a skill from consideration without del
 The registry now stores per-target installation records for each managed skill, including install path, mode, and last-seen status.
 
 At workflow startup, the harness synchronizes existing integration records and auto-imports required missing skills when they are already installed in detected target directories.
+
+Per-task skill control:
+
+- `default_skill_ids` are the run-level defaults.
+- Set `use_default_skills` to `false` on any task that should not inherit those defaults.
+- Set `skill_ids` on a task when you want an explicit skill set for that task.
+
+Task-level execution hints:
+
+- You can place extra execution hints inside a task's `context` to narrow Codex's search space.
+- Useful keys include `allowed_tools`, `forbidden_actions`, `preferred_sources`, `max_external_calls`, and `expected_artifacts`.
+- The intended use is to tell the model what sources or actions are acceptable for that task, for example forbidding repository scans on a market-data task or limiting the task to a known API and one output artifact.
 
 ## Input Requests
 

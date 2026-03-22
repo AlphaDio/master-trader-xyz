@@ -164,6 +164,12 @@ async function executeRun(config, runState, { interactive }) {
       });
 
       if (!execution.parsed) {
+        if (execution.abortedForExploration) {
+          throw new Error(execution.abortReason || `Codex was aborted for excessive exploration during task ${task.id}.`);
+        }
+        if (execution.timedOut) {
+          throw new Error(`Codex timed out while executing task ${task.id}.`);
+        }
         throw new Error(`Codex did not return a structured response for task ${task.id}.`);
       }
 
@@ -380,7 +386,11 @@ function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets
 }
 
 function selectSkillsForTask(runState, task) {
-  const skillIds = task.skill_ids.length > 0 ? task.skill_ids : runState.selected_skill_ids;
+  const skillIds = task.skill_ids.length > 0
+    ? task.skill_ids
+    : task.use_default_skills === false
+      ? []
+      : runState.selected_skill_ids;
   return runState.skill_snapshots.filter((skill) => skillIds.includes(skill.id));
 }
 

@@ -6,6 +6,7 @@ export const defaultWorkflow = {
     {
       id: "collect-base-prices",
       goal: "Find a way to get the best prices data in crypto on Base, and record them",
+      use_default_skills: false,
       skill_ids: [],
       context: {},
       outputSchema: {
@@ -57,6 +58,7 @@ export const defaultWorkflow = {
     {
       id: "analyze-prices-and-portfolio",
       goal: "Analyze the prices and get intel from it and analyze the present state of the portfolio",
+      use_default_skills: false,
       skill_ids: [],
       context: {},
       outputSchema: {
@@ -113,6 +115,7 @@ export const defaultWorkflow = {
     {
       id: "execute-transactions",
       goal: "Make transactions to grow or secure the value of the portfolio",
+      use_default_skills: false,
       skill_ids: [],
       context: {},
       outputSchema: {
@@ -161,6 +164,7 @@ export const defaultWorkflow = {
     {
       id: "evaluate-latest-run",
       goal: "Evaluate the latest run",
+      use_default_skills: false,
       skill_ids: [],
       context: {},
       outputSchema: {

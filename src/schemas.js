@@ -183,6 +183,7 @@ export const workflowSchema = {
         properties: {
           id: { type: "string" },
           goal: { type: "string" },
+          use_default_skills: { type: "boolean" },
           skill_ids: {
             type: "array",
             items: { type: "string" }

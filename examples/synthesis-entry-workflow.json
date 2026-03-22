@@ -14,7 +14,8 @@
           "kind": "http",
           "target": "https://synthesis.devfolio.co/register/init",
           "method": "HEAD",
-          "timeout_ms": 5000
+          "timeout_ms": 5000,
+          "inconclusive_status": [404, 405]
         }
       ],
       "skill_ids": [

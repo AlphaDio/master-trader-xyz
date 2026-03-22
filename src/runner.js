@@ -27,6 +27,9 @@ import {
 import { deepClone, getNestedValue, makeRunId, nowIso, safeJsonStringify, setNestedValue, writeJson } from "./utils.js";
 import { validateOrThrow } from "./validation.js";
 
+const MAX_OPERATION_ROUNDS_PER_TASK = 50;
+const MAX_REPEATED_OPERATION_BATCHES = 3;
+
 export async function runWorkflowOnce(options = {}) {
   const config = loadConfig();
   ensureStateLayout(config);
@@ -108,6 +111,9 @@ function createRunState(config, runId, selectedSkills, agentMemory, workflowDiag
     task_results: [],
     state_change_log: [],
     external_calls: [],
+    task_operation_results: {},
+    task_checkpoints: {},
+    task_operation_meta: {},
     workflow_diagnostics: workflowDiagnostics,
     evaluation: null,
     error: null
@@ -133,6 +139,9 @@ function normalizeRunState(runState, agentMemory = { values: {}, secret_refs: {}
     task_results: Array.isArray(runState.task_results) ? runState.task_results : [],
     state_change_log: Array.isArray(runState.state_change_log) ? runState.state_change_log : [],
     external_calls: Array.isArray(runState.external_calls) ? runState.external_calls : [],
+    task_operation_results: runState.task_operation_results || {},
+    task_checkpoints: runState.task_checkpoints || {},
+    task_operation_meta: runState.task_operation_meta || {},
     workflow_diagnostics: runState.workflow_diagnostics || null
   };
 }
@@ -147,6 +156,9 @@ async function executeRun(config, runState, { interactive }) {
 
     while (true) {
       runState.task_attempts[task.id] = attempt;
+      if (attempt > MAX_OPERATION_ROUNDS_PER_TASK) {
+        throw new Error(`Task ${task.id} exceeded the maximum of ${MAX_OPERATION_ROUNDS_PER_TASK} attempts while executing requested operations.`);
+      }
       const selectedSkills = selectSkillsForTask(runState, task);
       const preflight = await runTaskPreflightChecks(task);
       if (!preflight.ok) {
@@ -230,6 +242,74 @@ async function executeRun(config, runState, { interactive }) {
       }
 
       validateOrThrow(buildCodexTaskResponseSchema(task), execution.parsed, `Task ${task.id}`);
+      runState.task_checkpoints[task.id] = normalizeTaskCheckpoint(execution.parsed.task_checkpoint);
+
+      if (Array.isArray(execution.parsed.requested_operations) && execution.parsed.requested_operations.length > 0) {
+        const operationSignature = safeJsonStringify(execution.parsed.requested_operations);
+        const operationMeta = runState.task_operation_meta[task.id] || {
+          last_signature: null,
+          repeated_count: 0
+        };
+        const repeatedCount = operationMeta.last_signature === operationSignature
+          ? operationMeta.repeated_count + 1
+          : 1;
+        runState.task_operation_meta[task.id] = {
+          last_signature: operationSignature,
+          repeated_count: repeatedCount
+        };
+        if (repeatedCount > MAX_REPEATED_OPERATION_BATCHES) {
+          const blockedResponse = buildRepeatedOperationsBlockedResponse(task, execution.parsed.requested_operations, repeatedCount);
+          const redactedBlockedResponse = redactTaskArtifacts(blockedResponse, {
+            redactions: runtimeSecrets.redactions
+          });
+          persistTaskReceipts(runState, task, attempt, redactedBlockedResponse);
+          const taskResult = {
+            task_id: task.id,
+            goal: task.goal,
+            status: redactedBlockedResponse.status,
+            execution: redactedBlockedResponse.execution,
+            journal: redactedBlockedResponse.journal,
+            output: redactedBlockedResponse.output,
+            reasoning: redactedBlockedResponse.reasoning,
+            state_changes: redactedBlockedResponse.state_changes,
+            attempt,
+            skill_ids: selectedSkills.map((skill) => skill.id)
+          };
+          runState.task_results.push(taskResult);
+          runState.current_task_index = taskIndex + 1;
+          runState.blocked_task_index = null;
+          runState.pending_input_request_id = null;
+          runState.status = task.continue_on_blocked === true ? "running" : "blocked";
+          saveRunState(config, runState);
+          syncRunArtifact(config, runState);
+          writeJson(path.join(artifactsDir, "tasks", `${String(taskIndex + 1).padStart(2, "0")}-${task.id}`, "task-record.json"), taskResult);
+          writeTaskSideEffectArtifacts(artifactsDir, taskIndex, task.id, redactedBlockedResponse);
+          if (task.continue_on_blocked === true) {
+            sawPartial = true;
+            break;
+          }
+          runState.error = `Task blocked: ${task.id}`;
+          return finalizeRun(config, runState);
+        }
+        const operationResults = await executeRequestedOperations({
+          task,
+          attempt,
+          requestedOperations: execution.parsed.requested_operations
+        });
+        const taskOperationResults = Array.isArray(runState.task_operation_results[task.id])
+          ? runState.task_operation_results[task.id]
+          : [];
+        runState.task_operation_results[task.id] = [...taskOperationResults, ...operationResults];
+        persistOperationReceipts(runState, task, attempt, operationResults);
+        writeJson(
+          path.join(artifactsDir, "tasks", `${String(taskIndex + 1).padStart(2, "0")}-${task.id}`, `attempt-${attempt}-operation-results.json`),
+          operationResults
+        );
+        saveRunState(config, runState);
+        syncRunArtifact(config, runState);
+        attempt += 1;
+        continue;
+      }
 
       if (execution.parsed.status === "blocked_waiting_for_input") {
         if (!execution.parsed.input_request) {
@@ -327,6 +407,10 @@ async function executeRun(config, runState, { interactive }) {
       };
 
       runState.task_results.push(taskResult);
+      runState.task_operation_meta[task.id] = {
+        last_signature: null,
+        repeated_count: 0
+      };
       runState.current_task_index = taskIndex + 1;
       runState.blocked_task_index = null;
       runState.pending_input_request_id = null;
@@ -404,7 +488,19 @@ async function runPreflightCheck(check) {
     const expectedStatuses = Array.isArray(check.expected_status) && check.expected_status.length > 0
       ? check.expected_status
       : null;
+    const inconclusiveStatuses = Array.isArray(check.inconclusive_status) && check.inconclusive_status.length > 0
+      ? check.inconclusive_status
+      : [];
     const statusMatches = expectedStatuses ? expectedStatuses.includes(response.status) : response.ok;
+    if (!statusMatches && inconclusiveStatuses.includes(response.status)) {
+      return {
+        ok: true,
+        inconclusive: true,
+        kind: check.kind,
+        target: check.target,
+        status: `preflight returned HTTP ${response.status} and was treated as inconclusive`
+      };
+    }
     if (!statusMatches) {
       return {
         ok: false,
@@ -507,6 +603,8 @@ function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets
       continue_on_blocked: task.continue_on_blocked === true,
       preflight_checks: task.preflight_checks || []
     },
+    operation_results: runState.task_operation_results[task.id] || [],
+    task_checkpoint: runState.task_checkpoints[task.id] || { entries: [] },
     workflow_diagnostics: runState.workflow_diagnostics,
     selected_skills: selectedSkills.map((skill) => ({
       id: skill.id,
@@ -522,6 +620,80 @@ function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets
       output: taskResult.output
     }))
   };
+}
+
+async function executeRequestedOperations({ task, attempt, requestedOperations }) {
+  const results = [];
+
+  for (const operation of requestedOperations) {
+    if (operation.kind !== "http_request") {
+      results.push({
+        id: operation.id,
+        kind: operation.kind,
+        purpose: operation.purpose,
+        ok: false,
+        status: 0,
+        error: `Unsupported requested operation kind: ${operation.kind}`,
+        target: operation.url || ""
+      });
+      continue;
+    }
+
+    results.push(await executeHttpRequestOperation(task, attempt, operation));
+  }
+
+  return results;
+}
+
+async function executeHttpRequestOperation(task, attempt, operation) {
+  const headers = Object.fromEntries((operation.headers || []).map((header) => [header.name, header.value]));
+  const fetchOptions = {
+    method: operation.method,
+    headers,
+    redirect: "follow"
+  };
+
+  if (operation.body_format !== "none") {
+    fetchOptions.body = operation.body;
+  }
+
+  try {
+    const response = await fetch(operation.url, fetchOptions);
+    const responseText = await response.text();
+    return {
+      id: operation.id,
+      kind: operation.kind,
+      purpose: operation.purpose,
+      ok: response.ok,
+      status: response.status,
+      target: operation.url,
+      request: {
+        method: operation.method,
+        headers: operation.headers || [],
+        body_format: operation.body_format
+      },
+      response: {
+        headers: Object.fromEntries(response.headers.entries()),
+        body_text: responseText,
+        body_json: tryParseJson(responseText)
+      }
+    };
+  } catch (error) {
+    return {
+      id: operation.id,
+      kind: operation.kind,
+      purpose: operation.purpose,
+      ok: false,
+      status: 0,
+      target: operation.url,
+      request: {
+        method: operation.method,
+        headers: operation.headers || [],
+        body_format: operation.body_format
+      },
+      error: error.message
+    };
+  }
 }
 
 function selectSkillsForTask(runState, task) {
@@ -553,6 +725,8 @@ function buildEvaluationInput(runState) {
     task_results: runState.task_results,
     state_change_log: runState.state_change_log,
     external_calls: runState.external_calls,
+    task_operation_results: runState.task_operation_results,
+    task_checkpoints: runState.task_checkpoints,
     workflow_diagnostics: runState.workflow_diagnostics,
     status: runState.status,
     blocked_task_index: runState.blocked_task_index,
@@ -603,7 +777,55 @@ function buildPreflightBlockedResponse(task, preflight) {
       prompt: "",
       fields: []
     },
-    state_changes: []
+    state_changes: [],
+    requested_operations: [],
+    task_checkpoint: { entries: [] }
+  };
+}
+
+function buildRepeatedOperationsBlockedResponse(task, requestedOperations, repeatedCount) {
+  const summary = `The task is blocked because it requested the same operation batch ${repeatedCount} times without converging.`;
+  const operationTargets = requestedOperations.map((operation) => `${operation.method} ${operation.url}`).join(", ");
+  return {
+    status: "blocked",
+    execution: {
+      summary,
+      actions_taken: [
+        {
+          type: "repeated_requested_operations",
+          summary: `Repeated the same requested_operations batch ${repeatedCount} times: ${operationTargets}`
+        }
+      ],
+      external_calls: requestedOperations.map((operation) => ({
+        kind: `Repeated ${operation.kind}`,
+        target: operation.url,
+        status: `repeated_${repeatedCount}_times_without_progress`
+      })),
+      artifacts_created: []
+    },
+    journal: {
+      summary,
+      events: [
+        {
+          kind: "warning",
+          message: "The task kept requesting the same operation batch without making progress.",
+          timestamp: nowIso(),
+          data: operationTargets
+        }
+      ],
+      conclusions: [
+        "The task needs either a different next operation or an explicit terminal outcome."
+      ]
+    },
+    output: buildPlaceholderValue(task.outputSchema),
+    reasoning: "The task repeated the same harness-executed operation batch without converging on a new state.",
+    input_request: {
+      prompt: "",
+      fields: []
+    },
+    state_changes: [],
+    requested_operations: [],
+    task_checkpoint: { entries: [] }
   };
 }
 
@@ -756,6 +978,18 @@ function persistTaskReceipts(runState, task, attempt, response) {
       recorded_at: recordedAt
     })));
   }
+}
+
+function persistOperationReceipts(runState, task, attempt, operationResults) {
+  const recordedAt = nowIso();
+  runState.external_calls.push(...operationResults.map((result) => ({
+    kind: result.kind === "http_request" ? `Requested HTTP ${result.request?.method || ""}`.trim() : result.kind,
+    target: result.target || "",
+    status: result.ok ? `HTTP ${result.status}` : result.error || `HTTP ${result.status}`,
+    task_id: task.id,
+    attempt,
+    recorded_at: recordedAt
+  })));
 }
 
 function writeTaskSideEffectArtifacts(artifactsDir, taskIndex, taskId, response) {
@@ -931,6 +1165,33 @@ function collectConfiguredSkillIds(workflow, additionalSkillIds = []) {
     ...workflowTaskSkillIds,
     ...(additionalSkillIds || [])
   ])];
+}
+
+function tryParseJson(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTaskCheckpoint(taskCheckpoint) {
+  if (!taskCheckpoint || typeof taskCheckpoint !== "object" || !Array.isArray(taskCheckpoint.entries)) {
+    return { entries: [] };
+  }
+
+  return {
+    entries: taskCheckpoint.entries
+      .filter((entry) => entry && typeof entry.key === "string" && typeof entry.value_json === "string")
+      .map((entry) => ({
+        key: entry.key,
+        value_json: entry.value_json
+      }))
+  };
 }
 
 function buildPlaceholderValue(schema) {

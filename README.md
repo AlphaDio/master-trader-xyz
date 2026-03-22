@@ -183,6 +183,7 @@ Generic blocked-state handling:
 Preflight checks:
 
 - `preflight_checks` is an optional task field. Each check currently supports `kind: "http"` with `target`, optional `method`, optional `timeout_ms`, and optional `expected_status`.
+- `inconclusive_status` lets a preflight accept method-mismatch style responses such as `404` or `405` as non-blocking when the real task will use a different method, for example a `HEAD` probe ahead of a `POST` API call.
 - When a preflight check fails, the harness records a blocked task result before Codex runs, including the failed check in `execution.external_calls`.
 - This is useful for any task or skill that depends on a known API, webhook, docs site, RPC endpoint, or internal service.
 

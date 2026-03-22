@@ -205,6 +205,10 @@ export const workflowSchema = {
                 expected_status: {
                   type: "array",
                   items: { type: "integer", minimum: 100, maximum: 599 }
+                },
+                inconclusive_status: {
+                  type: "array",
+                  items: { type: "integer", minimum: 100, maximum: 599 }
                 }
               }
             }
@@ -280,11 +284,67 @@ export const taskStateChangeSchema = {
   }
 };
 
+export const requestedOperationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "kind", "method", "url", "headers", "body", "body_format", "purpose"],
+  properties: {
+    id: { type: "string" },
+    kind: {
+      type: "string",
+      enum: ["http_request"]
+    },
+    method: {
+      type: "string",
+      enum: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+    },
+    url: { type: "string" },
+    headers: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "value"],
+        properties: {
+          name: { type: "string" },
+          value: { type: "string" }
+        }
+      }
+    },
+    body: { type: "string" },
+    body_format: {
+      type: "string",
+      enum: ["none", "text", "json"]
+    },
+    purpose: { type: "string" }
+  }
+};
+
+export const taskCheckpointSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["entries"],
+  properties: {
+    entries: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["key", "value_json"],
+        properties: {
+          key: { type: "string" },
+          value_json: { type: "string" }
+        }
+      }
+    }
+  }
+};
+
 export function buildCodexTaskResponseSchema(task) {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["status", "execution", "journal", "output", "reasoning", "input_request", "state_changes"],
+    required: ["status", "execution", "journal", "output", "reasoning", "input_request", "state_changes", "requested_operations", "task_checkpoint"],
     properties: {
       status: {
         type: "string",
@@ -375,7 +435,12 @@ export function buildCodexTaskResponseSchema(task) {
       state_changes: {
         type: "array",
         items: taskStateChangeSchema
-      }
+      },
+      requested_operations: {
+        type: "array",
+        items: requestedOperationSchema
+      },
+      task_checkpoint: taskCheckpointSchema
     }
   };
 }

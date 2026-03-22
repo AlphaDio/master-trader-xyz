@@ -210,6 +210,62 @@ function buildCodexArgs(config, schemaPath) {
   return args;
 }
 
+const SKILL_MARKDOWN_MAX_CHARS = 2000;
+const PRIOR_OUTPUT_MAX_CHARS = 300;
+
+function truncate(text, maxChars) {
+  if (typeof text !== "string") {
+    return "";
+  }
+  if (typeof maxChars !== "number" || maxChars <= 0) {
+    return "";
+  }
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  const initialOmitted = text.length - maxChars;
+  let footer = `\n... [truncated, ${initialOmitted} chars omitted]`;
+
+  if (footer.length >= maxChars) {
+    return text.slice(0, maxChars);
+  }
+
+  const availableForText = maxChars - footer.length;
+  const visible = text.slice(0, availableForText);
+  const finalOmitted = text.length - visible.length;
+  footer = `\n... [truncated, ${finalOmitted} chars omitted]`;
+
+  if (visible.length + footer.length > maxChars) {
+    footer = footer.slice(0, maxChars - visible.length);
+  }
+
+  return visible + footer;
+}
+
+function summarizePriorResults(priorTaskResults) {
+  if (!Array.isArray(priorTaskResults) || priorTaskResults.length === 0) {
+    return [];
+  }
+  return priorTaskResults.map((result) => {
+    let outputStr = typeof result.output === "string"
+      ? result.output
+      : safeJsonStringify(result.output);
+    if (typeof result.output !== "string" && typeof outputStr === "string") {
+      try {
+        outputStr = JSON.stringify(JSON.parse(outputStr));
+      } catch {
+        outputStr = outputStr.replace(/\s+/g, " ").trim();
+      }
+    }
+    return {
+      task_id: result.task_id,
+      status: result.status,
+      output_summary: truncate(outputStr, PRIOR_OUTPUT_MAX_CHARS)
+    };
+  });
+}
+
 function buildTaskPrompt({
   runId,
   workflow,
@@ -224,11 +280,12 @@ function buildTaskPrompt({
         .map((skill) => [
           `Skill ID: ${skill.id}`,
           `Skill Title: ${skill.title}`,
+          skill.summary ? `Skill Summary: ${skill.summary}` : null,
           "Skill Metadata JSON:",
-          safeJsonStringify(skill.metadata),
+          JSON.stringify(skill.metadata),
           "Skill Markdown:",
-          skill.raw_markdown
-        ].join("\n"))
+          truncate(skill.raw_markdown, SKILL_MARKDOWN_MAX_CHARS)
+        ].filter(Boolean).join("\n"))
         .join("\n\n---\n\n")
     : "No skills selected for this task.";
 
@@ -317,10 +374,10 @@ function buildTaskPrompt({
     skillBlocks,
     "",
     "Task Context JSON:",
-    safeJsonStringify(taskContext),
+    JSON.stringify(taskContext),
     "",
     "Prior Task Results JSON:",
-    safeJsonStringify(priorTaskResults),
+    JSON.stringify(summarizePriorResults(priorTaskResults)),
     ""
   ].join("\n");
 }

@@ -244,6 +244,28 @@ function buildTaskPrompt({
       ]
     : [];
 
+  const synthesisRegistrationRules = task.id === "register-for-synthesis"
+    ? [
+        "Synthesis Registration Rules:",
+        "- If required human registration fields are missing, return blocked_waiting_for_input and ask only for the missing fields.",
+        "- Do not classify missing human registration fields as status blocked.",
+        "- Use status blocked only for non-human blockers such as missing POST capability, unreachable endpoints, missing permissions, or unavailable upstream services.",
+        "- If both human input and environment blockers exist, prefer blocked_waiting_for_input so the missing human fields can be collected for a later retry.",
+        "- If registration is externally blocked, record that clearly in execution.external_calls and explain what later retry condition is needed.",
+        ""
+      ]
+    : [];
+  const requiredHumanFields = Array.isArray(taskContext.task_specific?.required_human_profile_fields)
+    ? taskContext.task_specific.required_human_profile_fields
+    : [];
+  const requiredHumanFieldRules = requiredHumanFields.length > 0
+    ? [
+        "Required Human Fields:",
+        ...requiredHumanFields.map((field) => `- ${field}`),
+        ""
+      ]
+    : [];
+
   return [
     "You are executing one task in a workflow orchestrated by a Node.js agent.",
     "Return only JSON that matches the provided schema.",
@@ -276,6 +298,8 @@ function buildTaskPrompt({
     "- reasoning must be one sentence.",
     "",
     ...transactionRules,
+    ...synthesisRegistrationRules,
+    ...requiredHumanFieldRules,
     "Selected Skills:",
     skillBlocks,
     "",

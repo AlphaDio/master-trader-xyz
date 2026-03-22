@@ -23,6 +23,16 @@
       "context": {
         "objective": "Become an entered participant in The Synthesis contest.",
         "expected_agent_profile_path": "global.agentProfile",
+        "required_human_profile_fields": [
+          "humanInfo.name",
+          "humanInfo.email",
+          "humanInfo.background",
+          "humanInfo.cryptoExperience",
+          "humanInfo.aiAgentExperience",
+          "humanInfo.codingComfort",
+          "humanInfo.problemToSolve",
+          "humanInfo.verificationMethod"
+        ],
         "allowed_verification_methods": [
           "email",
           "twitter"
@@ -106,7 +116,8 @@
         "synthesis"
       ],
       "context": {
-        "objective": "Leave the project in a contest-ready planning state after entry."
+        "objective": "Leave the project in a contest-ready planning state after entry.",
+        "planning_mode": "If registration is blocked, still produce a provisional submission plan from the known agent context and prior task output."
       },
       "outputSchema": {
         "type": "object",

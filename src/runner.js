@@ -38,7 +38,13 @@ export async function runWorkflowOnce(options = {}) {
 
   const runId = makeRunId("agent");
   const selectedSkills = resolveSkillsForRun(config, selectedSkillIds);
-  const runState = createRunState(config, runId, selectedSkills, loadAgentMemory(config));
+  const runState = createRunState(
+    config,
+    runId,
+    selectedSkills,
+    loadAgentMemory(config),
+    buildWorkflowDiagnostics(config.workflow)
+  );
   const interactive = options.interactive !== false;
 
   acquireRunLock(config, runId);
@@ -79,7 +85,7 @@ export async function resumeWorkflow(runId, options = {}) {
   }
 }
 
-function createRunState(config, runId, selectedSkills, agentMemory) {
+function createRunState(config, runId, selectedSkills, agentMemory, workflowDiagnostics = null) {
   return normalizeRunState({
     run_id: runId,
     workflow: deepClone(config.workflow),
@@ -102,6 +108,7 @@ function createRunState(config, runId, selectedSkills, agentMemory) {
     task_results: [],
     state_change_log: [],
     external_calls: [],
+    workflow_diagnostics: workflowDiagnostics,
     evaluation: null,
     error: null
   }, agentMemory);
@@ -125,7 +132,8 @@ function normalizeRunState(runState, agentMemory = { values: {}, secret_refs: {}
     task_attempts: runState.task_attempts || {},
     task_results: Array.isArray(runState.task_results) ? runState.task_results : [],
     state_change_log: Array.isArray(runState.state_change_log) ? runState.state_change_log : [],
-    external_calls: Array.isArray(runState.external_calls) ? runState.external_calls : []
+    external_calls: Array.isArray(runState.external_calls) ? runState.external_calls : [],
+    workflow_diagnostics: runState.workflow_diagnostics || null
   };
 }
 
@@ -499,6 +507,7 @@ function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets
       continue_on_blocked: task.continue_on_blocked === true,
       preflight_checks: task.preflight_checks || []
     },
+    workflow_diagnostics: runState.workflow_diagnostics,
     selected_skills: selectedSkills.map((skill) => ({
       id: skill.id,
       title: skill.title,
@@ -544,6 +553,7 @@ function buildEvaluationInput(runState) {
     task_results: runState.task_results,
     state_change_log: runState.state_change_log,
     external_calls: runState.external_calls,
+    workflow_diagnostics: runState.workflow_diagnostics,
     status: runState.status,
     blocked_task_index: runState.blocked_task_index,
     pending_input_request_id: runState.pending_input_request_id,
@@ -601,6 +611,8 @@ function summarizeRun(runState) {
   return {
     runId: runState.run_id,
     runStatus: runState.status,
+    warnings: runState.workflow_diagnostics?.warnings || [],
+    workflowDiagnostics: runState.workflow_diagnostics,
     pendingInputRequestId: runState.pending_input_request_id,
     startedAt: runState.started_at,
     finishedAt: runState.finished_at,
@@ -612,6 +624,38 @@ function summarizeRun(runState) {
 
 export function printRunSummary(result) {
   return `${safeJsonStringify(result)}\n`;
+}
+
+function buildWorkflowDiagnostics(workflow) {
+  const diagnostics = {
+    workflow_id: workflow.id,
+    warnings: [],
+    synthesis_registration_task: null
+  };
+  const registrationTask = workflow.tasks.find((task) => task.id === "register-for-synthesis");
+
+  if (!registrationTask) {
+    return diagnostics;
+  }
+
+  diagnostics.synthesis_registration_task = {
+    continue_on_blocked: registrationTask.continue_on_blocked === true,
+    has_preflight_checks: Array.isArray(registrationTask.preflight_checks) && registrationTask.preflight_checks.length > 0
+  };
+
+  if (registrationTask.continue_on_blocked !== true) {
+    diagnostics.warnings.push(
+      "Active workflow register-for-synthesis task is missing continue_on_blocked=true, so downstream planning will stop when registration is externally blocked."
+    );
+  }
+
+  if (!diagnostics.synthesis_registration_task.has_preflight_checks) {
+    diagnostics.warnings.push(
+      "Active workflow register-for-synthesis task has no preflight_checks, so dependency failures will only be detected after Codex starts."
+    );
+  }
+
+  return diagnostics;
 }
 
 function applyStateChanges({ config, runState, task, attempt, response }) {

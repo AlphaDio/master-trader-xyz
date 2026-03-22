@@ -23,6 +23,16 @@
       "context": {
         "objective": "Handle contest registration when the operator wants it.",
         "expected_agent_profile_path": "global.agentProfile",
+        "required_human_profile_fields": [
+          "humanInfo.name",
+          "humanInfo.email",
+          "humanInfo.background",
+          "humanInfo.cryptoExperience",
+          "humanInfo.aiAgentExperience",
+          "humanInfo.codingComfort",
+          "humanInfo.problemToSolve",
+          "humanInfo.verificationMethod"
+        ],
         "allowed_verification_methods": [
           "email",
           "twitter"

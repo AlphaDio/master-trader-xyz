@@ -97,6 +97,8 @@ Print effective config:
 node src/index.js config print
 ```
 
+The printed config includes `workflowDiagnostics` so you can verify whether the active workflow is missing expected Synthesis controls before you run it.
+
 ## Synthesis Entry
 
 The repository is now set up to be entered into The Synthesis through the local harness, not just to store the skill.
@@ -117,6 +119,8 @@ $env:DEFAULT_SKILL_IDS="synthesis"
 $env:WORKFLOW_CONFIG_JSON=(Get-Content .\examples\synthesis-entry-workflow.json -Raw)
 node .\src\index.js run-once
 ```
+
+Prefer loading the workflow from the example file each time instead of keeping a copied inline `WORKFLOW_CONFIG_JSON` blob in `.env`. That avoids drift when the example workflow gains new controls such as `continue_on_blocked` or `preflight_checks`.
 
 That workflow is designed to:
 

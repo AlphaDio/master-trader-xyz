@@ -131,7 +131,7 @@ function normalizeRunState(runState, agentMemory = { values: {}, secret_refs: {}
 
 async function executeRun(config, runState, { interactive }) {
   const artifactsDir = getRunArtifactsDir(config, runState.run_id);
-  let sawPartial = runState.task_results.some((taskResult) => taskResult.status === "partial");
+  let sawPartial = runState.task_results.some((taskResult) => taskResult.status === "partial" || taskResult.status === "blocked");
 
   for (let taskIndex = runState.current_task_index; taskIndex < runState.workflow.tasks.length; taskIndex += 1) {
     const task = runState.workflow.tasks[taskIndex];
@@ -139,8 +139,56 @@ async function executeRun(config, runState, { interactive }) {
 
     while (true) {
       runState.task_attempts[task.id] = attempt;
-      const runtimeSecrets = resolveRuntimeSecrets(config, runState);
       const selectedSkills = selectSkillsForTask(runState, task);
+      const preflight = await runTaskPreflightChecks(task);
+      if (!preflight.ok) {
+        const blockedResponse = buildPreflightBlockedResponse(task, preflight);
+        const mutatedResponse = applyStateChanges({
+          config,
+          runState,
+          task,
+          attempt,
+          response: blockedResponse
+        });
+        const redactedResponse = redactTaskArtifacts(mutatedResponse.response, {
+          redactions: mutatedResponse.redactions
+        });
+        persistTaskReceipts(runState, task, attempt, redactedResponse);
+        const taskResult = {
+          task_id: task.id,
+          goal: task.goal,
+          status: redactedResponse.status,
+          execution: redactedResponse.execution,
+          journal: redactedResponse.journal,
+          output: redactedResponse.output,
+          reasoning: redactedResponse.reasoning,
+          state_changes: redactedResponse.state_changes,
+          attempt,
+          skill_ids: selectedSkills.map((skill) => skill.id)
+        };
+
+        runState.task_results.push(taskResult);
+        runState.current_task_index = taskIndex + 1;
+        runState.blocked_task_index = null;
+        runState.pending_input_request_id = null;
+        runState.status = "running";
+        saveRunState(config, runState);
+        syncRunArtifact(config, runState);
+
+        writeJson(path.join(artifactsDir, "tasks", `${String(taskIndex + 1).padStart(2, "0")}-${task.id}`, "task-record.json"), taskResult);
+        writeTaskSideEffectArtifacts(artifactsDir, taskIndex, task.id, redactedResponse);
+
+        if (task.continue_on_blocked === true) {
+          sawPartial = true;
+          break;
+        }
+
+        runState.status = "blocked";
+        runState.error = `Task blocked: ${task.id}`;
+        return finalizeRun(config, runState);
+      }
+
+      const runtimeSecrets = resolveRuntimeSecrets(config, runState);
       const taskContext = buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets);
       const priorTaskResults = runState.task_results.map((taskResult) => ({
         task_id: taskResult.task_id,
@@ -287,6 +335,17 @@ async function executeRun(config, runState, { interactive }) {
         return finalizeRun(config, runState);
       }
 
+      if (taskResult.status === "blocked") {
+        if (task.continue_on_blocked === true) {
+          sawPartial = true;
+          break;
+        }
+
+        runState.status = "blocked";
+        runState.error = `Task blocked: ${task.id}`;
+        return finalizeRun(config, runState);
+      }
+
       if (taskResult.status === "partial") {
         sawPartial = true;
       }
@@ -297,6 +356,73 @@ async function executeRun(config, runState, { interactive }) {
 
   runState.status = sawPartial ? "partial" : "completed";
   return finalizeRun(config, runState);
+}
+
+async function runTaskPreflightChecks(task) {
+  const checks = Array.isArray(task.preflight_checks) ? task.preflight_checks : [];
+  for (const check of checks) {
+    const result = await runPreflightCheck(check);
+    if (!result.ok) {
+      return result;
+    }
+  }
+
+  return { ok: true };
+}
+
+async function runPreflightCheck(check) {
+  if (check.kind !== "http") {
+    return {
+      ok: false,
+      kind: check.kind,
+      target: check.target,
+      status: `unsupported preflight kind: ${check.kind}`,
+      reason: `Unsupported preflight kind ${check.kind}.`
+    };
+  }
+
+  const timeoutMs = Number.isInteger(check.timeout_ms) ? check.timeout_ms : 5000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(check.target, {
+      method: check.method || "HEAD",
+      signal: controller.signal,
+      redirect: "follow"
+    });
+    clearTimeout(timeoutId);
+
+    const expectedStatuses = Array.isArray(check.expected_status) && check.expected_status.length > 0
+      ? check.expected_status
+      : null;
+    const statusMatches = expectedStatuses ? expectedStatuses.includes(response.status) : response.ok;
+    if (!statusMatches) {
+      return {
+        ok: false,
+        kind: check.kind,
+        target: check.target,
+        status: `preflight returned HTTP ${response.status}`,
+        reason: `Preflight check for ${check.target} returned HTTP ${response.status}.`
+      };
+    }
+
+    return {
+      ok: true,
+      kind: check.kind,
+      target: check.target,
+      status: `preflight returned HTTP ${response.status}`
+    };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    return {
+      ok: false,
+      kind: check.kind,
+      target: check.target,
+      status: `preflight failed: ${error.message}`,
+      reason: `Preflight check for ${check.target} failed: ${error.message}`
+    };
+  }
 }
 
 async function handlePendingInput(config, runState, interactive) {
@@ -369,6 +495,10 @@ function buildTaskContext(config, runState, task, selectedSkills, runtimeSecrets
     },
     secrets: runtimeSecrets.secrets,
     task_specific: task.context,
+    task_controls: {
+      continue_on_blocked: task.continue_on_blocked === true,
+      preflight_checks: task.preflight_checks || []
+    },
     selected_skills: selectedSkills.map((skill) => ({
       id: skill.id,
       title: skill.title,
@@ -418,6 +548,52 @@ function buildEvaluationInput(runState) {
     blocked_task_index: runState.blocked_task_index,
     pending_input_request_id: runState.pending_input_request_id,
     error: runState.error
+  };
+}
+
+function buildPreflightBlockedResponse(task, preflight) {
+  const summary = `The task is blocked before execution because a configured preflight check failed for ${preflight.target}.`;
+  const note = preflight.reason || summary;
+  return {
+    status: "blocked",
+    execution: {
+      summary,
+      actions_taken: [
+        {
+          type: "preflight_check_failed",
+          summary: note
+        }
+      ],
+      external_calls: [
+        {
+          kind: `Preflight ${String(preflight.kind || "check").toUpperCase()}`,
+          target: preflight.target || "",
+          status: preflight.status || "preflight failed"
+        }
+      ],
+      artifacts_created: []
+    },
+    journal: {
+      summary: note,
+      events: [
+        {
+          kind: "warning",
+          message: "Task execution was blocked by a failed preflight check.",
+          timestamp: nowIso(),
+          data: note
+        }
+      ],
+      conclusions: [
+        "The task could not safely start because a required dependency check failed."
+      ]
+    },
+    output: buildPlaceholderValue(task.outputSchema),
+    reasoning: "A configured preflight dependency check failed before task execution could begin.",
+    input_request: {
+      prompt: "",
+      fields: []
+    },
+    state_changes: []
   };
 }
 
@@ -711,6 +887,45 @@ function collectConfiguredSkillIds(workflow, additionalSkillIds = []) {
     ...workflowTaskSkillIds,
     ...(additionalSkillIds || [])
   ])];
+}
+
+function buildPlaceholderValue(schema) {
+  if (!schema || typeof schema !== "object") {
+    return {};
+  }
+
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    return schema.enum[0];
+  }
+
+  if (Array.isArray(schema.oneOf) && schema.oneOf.length > 0) {
+    const nullableOption = schema.oneOf.find((option) => option?.type === "null");
+    return nullableOption ? null : buildPlaceholderValue(schema.oneOf[0]);
+  }
+
+  if (schema.type === "object" || schema.properties) {
+    return Object.fromEntries(
+      Object.entries(schema.properties || {}).map(([key, value]) => [key, buildPlaceholderValue(value)])
+    );
+  }
+
+  if (schema.type === "array") {
+    return [];
+  }
+
+  if (schema.type === "number" || schema.type === "integer") {
+    return 0;
+  }
+
+  if (schema.type === "boolean") {
+    return false;
+  }
+
+  if (schema.type === "null") {
+    return null;
+  }
+
+  return "";
 }
 
 function resolveSelectedSkillIds(config) {

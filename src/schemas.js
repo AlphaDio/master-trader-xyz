@@ -184,6 +184,31 @@ export const workflowSchema = {
           id: { type: "string" },
           goal: { type: "string" },
           use_default_skills: { type: "boolean" },
+          continue_on_blocked: { type: "boolean" },
+          preflight_checks: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["kind", "target"],
+              properties: {
+                kind: {
+                  type: "string",
+                  enum: ["http"]
+                },
+                target: { type: "string" },
+                method: {
+                  type: "string",
+                  enum: ["GET", "HEAD"]
+                },
+                timeout_ms: { type: "integer", minimum: 1 },
+                expected_status: {
+                  type: "array",
+                  items: { type: "integer", minimum: 100, maximum: 599 }
+                }
+              }
+            }
+          },
           skill_ids: {
             type: "array",
             items: { type: "string" }
@@ -207,7 +232,7 @@ export const runEvaluationSchema = {
   properties: {
     status: {
       type: "string",
-      enum: ["completed", "partial", "failed", "blocked_waiting_for_input"]
+      enum: ["completed", "partial", "failed", "blocked", "blocked_waiting_for_input"]
     },
     score: { type: "number", minimum: 0, maximum: 1 },
     summary: { type: "string" },
@@ -263,7 +288,7 @@ export function buildCodexTaskResponseSchema(task) {
     properties: {
       status: {
         type: "string",
-        enum: ["completed", "partial", "failed", "blocked_waiting_for_input"]
+        enum: ["completed", "partial", "failed", "blocked", "blocked_waiting_for_input"]
       },
       execution: {
         type: "object",

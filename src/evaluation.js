@@ -31,7 +31,7 @@ function buildEvaluationPrompt(runState) {
     "- Fill every schema field.",
     "- Evaluate what worked and what failed.",
     "- Mention risks in free text only.",
-    "- Consider task_results, state_change_log, external_calls, blocked input, and final run status together.",
+    "- Consider task_results, state_change_log, external_calls, blocked input, blocked external dependencies, and final run status together.",
     "- Keep score between 0 and 1.",
     "- Keep one_line_assessment to one sentence.",
     "",

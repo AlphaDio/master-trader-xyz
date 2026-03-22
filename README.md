@@ -114,7 +114,7 @@ Example PowerShell flow:
 
 ```powershell
 $env:DEFAULT_SKILL_IDS="synthesis"
-$env:WORKFLOW_CONFIG_JSON=Get-Content .\examples\synthesis-entry-workflow.json -Raw
+$env:WORKFLOW_CONFIG_JSON=(Get-Content .\examples\synthesis-entry-workflow.json -Raw)
 node .\src\index.js run-once
 ```
 
@@ -165,6 +165,27 @@ Per-task skill control:
 - `default_skill_ids` are the run-level defaults.
 - Set `use_default_skills` to `false` on any task that should not inherit those defaults.
 - Set `skill_ids` on a task when you want an explicit skill set for that task.
+- Set `continue_on_blocked` to `true` when later tasks should still run after this task is blocked by an external dependency.
+- Set `preflight_checks` when a task depends on a known external endpoint and you want the harness to verify reachability before launching Codex.
+
+Generic blocked-state handling:
+
+- Tasks can now return `status: "blocked"` for non-human blockers such as unreachable APIs, missing permissions, missing tools, or unavailable upstream services.
+- `blocked_waiting_for_input` remains the human-input path and still creates an inbox request.
+- Blocked tasks may still persist `state_changes`, which is useful for checkpoints, partial handles, or retry metadata.
+- If a blocked task has `continue_on_blocked: true`, the workflow continues and the final run status becomes `partial` unless another task fails harder.
+- If `continue_on_blocked` is not set, a blocked task stops the workflow with run status `blocked`.
+
+Preflight checks:
+
+- `preflight_checks` is an optional task field. Each check currently supports `kind: "http"` with `target`, optional `method`, optional `timeout_ms`, and optional `expected_status`.
+- When a preflight check fails, the harness records a blocked task result before Codex runs, including the failed check in `execution.external_calls`.
+- This is useful for any task or skill that depends on a known API, webhook, docs site, RPC endpoint, or internal service.
+
+Output schema authoring for blocked states:
+
+- If a field may be unavailable during a blocked or degraded run, prefer making it nullable in the task `outputSchema`, for example `oneOf: [{ "type": "string" }, { "type": "null" }]`.
+- If the schema does not allow `null`, the harness and model will fall back to schema-compatible placeholder values.
 
 Task-level execution hints:
 

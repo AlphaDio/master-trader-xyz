@@ -8,6 +8,15 @@
     {
       "id": "register-for-synthesis",
       "goal": "Register this agent for The Synthesis hackathon if registration is requested, asking for only the minimum human input needed and persisting any pending IDs, participant IDs, team IDs, invite codes, and API credentials returned during the process.",
+      "continue_on_blocked": true,
+      "preflight_checks": [
+        {
+          "kind": "http",
+          "target": "https://synthesis.devfolio.co/register/init",
+          "method": "HEAD",
+          "timeout_ms": 5000
+        }
+      ],
       "skill_ids": [
         "synthesis"
       ],

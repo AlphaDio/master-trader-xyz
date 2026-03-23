@@ -65,7 +65,6 @@ export async function runCli(argv = process.argv.slice(2)) {
 
       process.stdout.write(`${safeJsonStringify({
         workflow: config.workflow,
-        workflowDiagnostics: buildConfigWorkflowDiagnostics(config.workflow),
         skillUrls: config.skillUrls,
         defaultSkillIds: config.defaultSkillIds,
         skillTargets: config.skillTargets,
@@ -236,36 +235,4 @@ function writeWarnings(warnings) {
   for (const warning of warnings) {
     process.stderr.write(`[workflow-warning] ${warning}\n`);
   }
-}
-
-function buildConfigWorkflowDiagnostics(workflow) {
-  const diagnostics = {
-    workflow_id: workflow.id,
-    warnings: [],
-    synthesis_registration_task: null
-  };
-  const registrationTask = workflow.tasks.find((task) => task.id === "register-for-synthesis");
-
-  if (!registrationTask) {
-    return diagnostics;
-  }
-
-  diagnostics.synthesis_registration_task = {
-    continue_on_blocked: registrationTask.continue_on_blocked === true,
-    has_preflight_checks: Array.isArray(registrationTask.preflight_checks) && registrationTask.preflight_checks.length > 0
-  };
-
-  if (registrationTask.continue_on_blocked !== true) {
-    diagnostics.warnings.push(
-      "Active workflow register-for-synthesis task is missing continue_on_blocked=true, so downstream planning will stop when registration is externally blocked."
-    );
-  }
-
-  if (!diagnostics.synthesis_registration_task.has_preflight_checks) {
-    diagnostics.warnings.push(
-      "Active workflow register-for-synthesis task has no preflight_checks, so dependency failures will only be detected after Codex starts."
-    );
-  }
-
-  return diagnostics;
 }

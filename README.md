@@ -2,24 +2,13 @@
 
 Node.js CLI agent harness built around local `codex exec`.
 
-It now supports:
+The project is now focused on being a practical personal operator tool:
 
-- first-class Markdown skills stored in a local registry,
-- checking installed skills across known agent skill directories,
-- importing detected skills into the local registry,
-- integrating managed skills back into agent-specific skill directories,
-- persisting per-target integration state inside the local skill registry,
-- ordered workflow tasks with strict JSON schemas,
-- JSON state and immutable run artifacts,
-- blocked/resume runs via inbox request objects,
-- direct CLI prompting or async inbox answering,
-- generic run-scoped and agent-scoped durable state changes returned by Codex,
-- durable agent memory for reusable non-secret values and secret references across runs,
-- persisted external-call receipts for audit and later evaluation,
-- run-level evaluation after execution,
-- transaction guardrails enforced by the Node.js harness.
-
-There is no internal cron daemon. It is a Node.js process you invoke directly.
+- run a workflow locally,
+- keep durable state and artifacts,
+- ask for only the missing input,
+- enforce transaction guardrails,
+- resume blocked runs cleanly.
 
 ## Requirements
 
@@ -34,17 +23,6 @@ copy .env.example .env
 ```
 
 Then fill in the values you want to provide through environment variables.
-
-## Default Workflow
-
-The built-in workflow is still the four-task crypto/Base sequence:
-
-1. Find a way to get the best prices data in crypto on Base, and record them
-2. Analyze the prices and get intel from it and analyze the present state of the portfolio
-3. Make transactions to grow or secure the value of the portfolio
-4. Evaluate the latest run
-
-Override the workflow at runtime with `WORKFLOW_CONFIG_JSON` if needed.
 
 ## Commands
 
@@ -66,20 +44,23 @@ Resume a blocked run:
 node src/index.js resume <run-id>
 ```
 
+Print effective config:
+
+```bash
+node src/index.js config print
+```
+
 Manage skills:
 
 ```bash
-node src/index.js skills add --url https://synthesis.devfolio.co/skill.md --name synthesis
 node src/index.js skills list
 node src/index.js skills check
 node src/index.js skills import --tool codex
-node src/index.js skills integrate synthesis --tool codex
-node src/index.js skills show synthesis
-node src/index.js skills refresh synthesis
-node src/index.js skills remove synthesis
-node src/index.js skills disable synthesis
-node src/index.js skills enable synthesis
-node src/index.js skills delete synthesis
+node src/index.js skills show <skill-id>
+node src/index.js skills refresh <skill-id>
+node src/index.js skills enable <skill-id>
+node src/index.js skills disable <skill-id>
+node src/index.js skills delete <skill-id>
 ```
 
 Manage inbox requests:
@@ -91,43 +72,16 @@ node src/index.js inbox answer <request-id>
 node src/index.js inbox import <file-path>
 ```
 
-Print effective config:
+## Default Workflow
 
-```bash
-node src/index.js config print
-```
+The built-in workflow is the four-task crypto/Base sequence:
 
-The printed config includes `workflowDiagnostics` so you can verify whether the active workflow is missing expected Synthesis controls before you run it.
+1. Collect price and market context
+2. Analyze prices and portfolio state
+3. Propose or perform guarded transactions
+4. Evaluate the latest run
 
-## Synthesis Entry
-
-The repository is now set up to be entered into The Synthesis through the local harness, not just to store the skill.
-
-Recommended operator setup:
-
-1. Put `synthesis` in `DEFAULT_SKILL_IDS`.
-2. Set `AGENT_CONTEXT_JSON` with an `agentProfile` object containing at least `name`, `description`, `agentHarness`, and `model`.
-3. Keep `TRANSACTION_EXECUTION_MODE=dry-run` while registering and preparing the submission.
-4. Use the ready-made workflow in [`examples/synthesis-entry-workflow.json`](./examples/synthesis-entry-workflow.json) by loading it into `WORKFLOW_CONFIG_JSON`.
-
-If you want registration to coexist with the trading workflow, use [`examples/synthesis-trader-workflow.json`](./examples/synthesis-trader-workflow.json). It gives `synthesis` only to the registration task and keeps the market-analysis, execution, and evaluation tasks free of default skills.
-
-Example PowerShell flow:
-
-```powershell
-$env:DEFAULT_SKILL_IDS="synthesis"
-$env:WORKFLOW_CONFIG_JSON=(Get-Content .\examples\synthesis-entry-workflow.json -Raw)
-node .\src\index.js run-once
-```
-
-Prefer loading the workflow from the example file each time instead of keeping a copied inline `WORKFLOW_CONFIG_JSON` blob in `.env`. That avoids drift when the example workflow gains new controls such as `continue_on_blocked` or `preflight_checks`.
-
-That workflow is designed to:
-
-- register the agent for The Synthesis,
-- block only when human verification input is required,
-- persist registration handles and secrets for resume,
-- leave behind a submission plan after entry.
+Override the workflow at runtime with `WORKFLOW_CONFIG_JSON` if needed.
 
 ## State Layout
 
@@ -142,7 +96,7 @@ Mutable state is stored under `state/`:
 
 Immutable run artifacts are stored under `artifacts/<run-id>/`.
 
-## Skill Targets
+## Skills
 
 The harness can inspect and write skills in tool-specific skill directories. By default it knows about:
 
@@ -156,93 +110,13 @@ Use `skills check` to see which targets exist and which skills are already insta
 
 Use `skills import` to pull detected local skills into the agent's own registry.
 
-Use `skills integrate <skill-id>` to install a registry-managed skill into one or more tool-specific directories. File-backed skills are copied as full packages when possible; URL-backed skills are written as a `SKILL.md` package.
-
-Use `skills remove <skill-id>` to exclude a skill from consideration without deleting it from the registry or uninstalling it from any tool directory. Use `skills delete <skill-id>` only when you want to remove the registry record itself.
-
-The registry now stores per-target installation records for each managed skill, including install path, mode, and last-seen status.
-
-At workflow startup, the harness synchronizes existing integration records and auto-imports required missing skills when they are already installed in detected target directories.
-
-Per-task skill control:
-
-- `default_skill_ids` are the run-level defaults.
-- Set `use_default_skills` to `false` on any task that should not inherit those defaults.
-- Set `skill_ids` on a task when you want an explicit skill set for that task.
-- Set `continue_on_blocked` to `true` when later tasks should still run after this task is blocked by an external dependency.
-- Set `preflight_checks` when a task depends on a known external endpoint and you want the harness to verify reachability before launching Codex.
-
-Generic blocked-state handling:
-
-- Tasks can now return `status: "blocked"` for non-human blockers such as unreachable APIs, missing permissions, missing tools, or unavailable upstream services.
-- `blocked_waiting_for_input` remains the human-input path and still creates an inbox request.
-- Blocked tasks may still persist `state_changes`, which is useful for checkpoints, partial handles, or retry metadata.
-- If a blocked task has `continue_on_blocked: true`, the workflow continues and the final run status becomes `partial` unless another task fails harder.
-- If `continue_on_blocked` is not set, a blocked task stops the workflow with run status `blocked`.
-
-Preflight checks:
-
-- `preflight_checks` is an optional task field. Each check currently supports `kind: "http"` with `target`, optional `method`, optional `timeout_ms`, and optional `expected_status`.
-- `inconclusive_status` lets a preflight accept method-mismatch style responses such as `404` or `405` as non-blocking when the real task will use a different method, for example a `HEAD` probe ahead of a `POST` API call.
-- When a preflight check fails, the harness records a blocked task result before Codex runs, including the failed check in `execution.external_calls`.
-- This is useful for any task or skill that depends on a known API, webhook, docs site, RPC endpoint, or internal service.
-
-Output schema authoring for blocked states:
-
-- If a field may be unavailable during a blocked or degraded run, prefer making it nullable in the task `outputSchema`, for example `oneOf: [{ "type": "string" }, { "type": "null" }]`.
-- If the schema does not allow `null`, the harness and model will fall back to schema-compatible placeholder values.
-
-Task-level execution hints:
-
-- You can place extra execution hints inside a task's `context` to narrow Codex's search space.
-- Useful keys include `allowed_tools`, `forbidden_actions`, `preferred_sources`, `max_external_calls`, and `expected_artifacts`.
-- The intended use is to tell the model what sources or actions are acceptable for that task, for example forbidding repository scans on a market-data task or limiting the task to a known API and one output artifact.
+Use `skills integrate <skill-id>` to install a registry-managed skill into one or more tool-specific directories.
 
 ## Input Requests
 
-When Codex says a task needs human input, the harness creates a minimal inbox object:
-
-```json
-{
-  "id": "req_123",
-  "run_id": "run_123",
-  "task_id": "task_1",
-  "skill_id": "synthesis",
-  "status": "open",
-  "prompt": "Please provide the missing registration details.",
-  "fields": [
-    {
-      "key": "humanInfo.email",
-      "label": "Email",
-      "required": true,
-      "secret": false,
-      "hint": "",
-      "value": null,
-      "secret_ref": null
-    }
-  ]
-}
-```
+When Codex says a task needs human input, the harness creates a minimal inbox object and blocks the run cleanly.
 
 For non-interactive runs, answer later through `inbox answer` or `inbox import`, then resume the run.
-
-## Secrets
-
-- Long-lived operator secrets come from env vars listed in `AGENT_SECRET_KEYS`.
-- Secret answers gathered during a run are stored separately under `state/secrets/`.
-- Secret values returned in task `state_changes` are also moved into `state/secrets/` and replaced with secret references.
-- Prompts and saved artifacts are redacted before persistence.
-
-## Durable State Changes
-
-Tasks can now return `state_changes` alongside normal task output.
-
-- Use scope `run` for handles or checkpoints only needed by later tasks in the current workflow run.
-- Use scope `agent` for reusable values that should survive into future runs.
-- Use sensitivity `secret` for credentials or confidential values; the harness will persist them as secret references instead of leaving raw values in artifacts.
-- Blocked tasks can persist state changes before asking for more input, which lets later resume steps continue with saved pending IDs, URLs, or other intermediate handles.
-
-The harness also aggregates redacted `external_calls` and `state_changes` into run state and per-task artifacts for later evaluation.
 
 ## Transaction Guardrails
 
@@ -264,11 +138,9 @@ Default behavior is conservative:
 - more than 3 actions in one execution task is rejected
 - `approve_unlimited`, `bridge`, and `deploy_contract` are blocked unless you override them
 
-If Codex proposes actions that violate policy, the task is converted to a failed result and the run stops.
-
 ## Notes
 
 - Skills are opt-in. They are only attached when selected by workflow config or `DEFAULT_SKILL_IDS`.
-- Synthesis is just one skill among many possible Markdown skills.
-- The harness does not implement exchange- or Synthesis-specific clients. It gives Codex the skill/context and records the structured result.
-- Skill target discovery can be overridden with `SKILL_TARGETS_JSON` when you want custom locations or a narrower integration surface.
+- Prompts and saved artifacts are redacted before persistence.
+- The harness aggregates `external_calls` and `state_changes` into run state and per-task artifacts for later evaluation.
+- Archived workflow examples can remain in `examples/`, but they are no longer the primary path through the project.

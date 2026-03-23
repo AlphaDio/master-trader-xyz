@@ -36,7 +36,6 @@
           </div>
           <div class="hero__actions">
             <a class="button button--primary" href="https://github.com/AlphaDio/master-trader-xyz" target="_blank" rel="noreferrer">View Repository</a>
-            <a class="button button--ghost" href="https://synthesis.devfolio.co/skill.md" target="_blank" rel="noreferrer">Synthesis Skill</a>
           </div>
         </div>
       </section>
@@ -72,7 +71,7 @@
             <li>Collects market context and price signals from Base-related sources.</li>
             <li>Analyzes portfolio state and proposes next actions in structured JSON.</li>
             <li>Enforces execution guardrails before any live transaction is accepted.</li>
-            <li>Supports dedicated contest tasks such as Synthesis registration without polluting trading tasks.</li>
+            <li>Persists run state and durable memory so long-running workflows can be resumed instead of restarted.</li>
           </ul>
         </section>
         <section class="section">
@@ -87,13 +86,10 @@
       <section class="section">
         <h2>Run the Agent</h2>
         <p>
-          This project is designed to run locally as a Codex-powered CLI harness. To launch the Synthesis registration workflow,
-          set the workflow config and start a run:
+          This project is designed to run locally as a Codex-powered CLI harness. Start the default workflow with:
         </p>
         <div class="terminal">
-          <code>$env:DEFAULT_SKILL_IDS="synthesis"
-$env:WORKFLOW_CONFIG_JSON=Get-Content .\examples\synthesis-entry-workflow.json -Raw
-node .\src\index.js run-once</code>
+          <code>node .\src\index.js run-once</code>
         </div>
       </section>
 

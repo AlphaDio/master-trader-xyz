@@ -301,20 +301,6 @@ function buildTaskPrompt({
       ]
     : [];
 
-  const synthesisRegistrationRules = task.id === "register-for-synthesis"
-    ? [
-        "Synthesis Registration Rules:",
-        "- If required human registration fields are missing, return blocked_waiting_for_input and ask only for the missing fields.",
-        "- Do not classify missing human registration fields as status blocked.",
-        "- For missing human registration data, create one input_request field per missing value. Do not combine multiple required registration values into a single free-form field.",
-        "- Use these exact keys when needed: humanInfo.name, humanInfo.email, humanInfo.background, humanInfo.cryptoExperience, humanInfo.aiAgentExperience, humanInfo.codingComfort, humanInfo.problemToSolve, humanInfo.verificationMethod.",
-        "- Keep labels short and specific, for example Full name, Email address, Background, Crypto experience, AI agent experience, Coding comfort, Problem to solve, Verification method.",
-        "- Use status blocked only for non-human blockers such as missing POST capability, unreachable endpoints, missing permissions, or unavailable upstream services.",
-        "- If both human input and environment blockers exist, prefer blocked_waiting_for_input so the missing human fields can be collected for a later retry.",
-        "- If registration is externally blocked, record that clearly in execution.external_calls and explain what later retry condition is needed.",
-        ""
-      ]
-    : [];
   const requiredHumanFields = Array.isArray(taskContext.task_specific?.required_human_profile_fields)
     ? taskContext.task_specific.required_human_profile_fields
     : [];
@@ -322,6 +308,8 @@ function buildTaskPrompt({
     ? [
         "Required Human Fields:",
         ...requiredHumanFields.map((field) => `- ${field}`),
+        "- If any required human fields are missing, return blocked_waiting_for_input and ask only for the missing fields.",
+        "- Create one input_request field per missing value. Do not combine multiple required values into one free-form field.",
         ""
       ]
     : [];
@@ -368,7 +356,6 @@ function buildTaskPrompt({
     "- reasoning must be one sentence.",
     "",
     ...transactionRules,
-    ...synthesisRegistrationRules,
     ...requiredHumanFieldRules,
     "Selected Skills:",
     skillBlocks,

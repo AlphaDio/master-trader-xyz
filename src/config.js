@@ -24,8 +24,8 @@ const defaultAgentContext = {
     model: "gpt-5.4-mini"
   }
 };
-const defaultSkillUrls = ["https://synthesis.devfolio.co/skill.md"];
-const defaultSkillIds = ["synthesis"];
+const defaultSkillUrls = [];
+const defaultSkillIds = [];
 
 export function loadConfig() {
   const workflow = validateOrThrow(

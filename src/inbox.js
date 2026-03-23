@@ -73,6 +73,13 @@ export function importInputRequestAnswers(config, filePath) {
   return merged;
 }
 
+export function applyPostedInputRequestAnswers(config, requestId, answersByKey) {
+  const request = loadInputRequest(config, requestId);
+  const merged = mergePostedAnswers(config, request, answersByKey || {});
+  saveInputRequest(config, merged);
+  return merged;
+}
+
 export function applyInputRequestAnswers(runState, request) {
   for (const field of request.fields) {
     if (field.secret) {
@@ -178,6 +185,49 @@ function mergeImportedAnswers(config, existing, imported) {
       return nextField;
     }),
     answered_at: imported.answered_at ?? existing.answered_at
+  };
+
+  if (requestIsAnswered(merged)) {
+    merged.status = "answered";
+    merged.answered_at = merged.answered_at || nowIso();
+  }
+
+  return validateOrThrow(persistedInputRequestSchema, merged, `Input request ${merged.id}`);
+}
+
+function mergePostedAnswers(config, existing, answersByKey) {
+  const merged = {
+    ...existing,
+    fields: existing.fields.map((field) => {
+      if (!Object.prototype.hasOwnProperty.call(answersByKey, field.key)) {
+        return field;
+      }
+
+      const rawValue = answersByKey[field.key];
+      if (field.secret) {
+        if (typeof rawValue !== "string" || rawValue.length === 0) {
+          return field;
+        }
+
+        return {
+          ...field,
+          value: null,
+          secret_ref: storeSecretValue(config, {
+            value: rawValue,
+            key: field.key,
+            label: field.label,
+            runId: existing.run_id,
+            taskId: existing.task_id
+          })
+        };
+      }
+
+      return {
+        ...field,
+        value: rawValue
+      };
+    }),
+    answered_at: existing.answered_at
   };
 
   if (requestIsAnswered(merged)) {

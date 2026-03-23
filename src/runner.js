@@ -45,8 +45,7 @@ export async function runWorkflowOnce(options = {}) {
     config,
     runId,
     selectedSkills,
-    loadAgentMemory(config),
-    buildWorkflowDiagnostics(config.workflow)
+    loadAgentMemory(config)
   );
   const interactive = options.interactive !== false;
 
@@ -88,7 +87,7 @@ export async function resumeWorkflow(runId, options = {}) {
   }
 }
 
-function createRunState(config, runId, selectedSkills, agentMemory, workflowDiagnostics = null) {
+function createRunState(config, runId, selectedSkills, agentMemory) {
   return normalizeRunState({
     run_id: runId,
     workflow: deepClone(config.workflow),
@@ -114,7 +113,6 @@ function createRunState(config, runId, selectedSkills, agentMemory, workflowDiag
     task_operation_results: {},
     task_checkpoints: {},
     task_operation_meta: {},
-    workflow_diagnostics: workflowDiagnostics,
     evaluation: null,
     error: null
   }, agentMemory);
@@ -141,8 +139,7 @@ function normalizeRunState(runState, agentMemory = { values: {}, secret_refs: {}
     external_calls: Array.isArray(runState.external_calls) ? runState.external_calls : [],
     task_operation_results: runState.task_operation_results || {},
     task_checkpoints: runState.task_checkpoints || {},
-    task_operation_meta: runState.task_operation_meta || {},
-    workflow_diagnostics: runState.workflow_diagnostics || null
+    task_operation_meta: runState.task_operation_meta || {}
   };
 }
 
@@ -830,12 +827,11 @@ function buildRepeatedOperationsBlockedResponse(task, requestedOperations, repea
   };
 }
 
-function summarizeRun(runState) {
+export function summarizeRun(runState) {
   return {
     runId: runState.run_id,
     runStatus: runState.status,
-    warnings: runState.workflow_diagnostics?.warnings || [],
-    workflowDiagnostics: runState.workflow_diagnostics,
+    warnings: [],
     pendingInputRequestId: runState.pending_input_request_id,
     startedAt: runState.started_at,
     finishedAt: runState.finished_at,
@@ -847,38 +843,6 @@ function summarizeRun(runState) {
 
 export function printRunSummary(result) {
   return `${safeJsonStringify(result)}\n`;
-}
-
-function buildWorkflowDiagnostics(workflow) {
-  const diagnostics = {
-    workflow_id: workflow.id,
-    warnings: [],
-    synthesis_registration_task: null
-  };
-  const registrationTask = workflow.tasks.find((task) => task.id === "register-for-synthesis");
-
-  if (!registrationTask) {
-    return diagnostics;
-  }
-
-  diagnostics.synthesis_registration_task = {
-    continue_on_blocked: registrationTask.continue_on_blocked === true,
-    has_preflight_checks: Array.isArray(registrationTask.preflight_checks) && registrationTask.preflight_checks.length > 0
-  };
-
-  if (registrationTask.continue_on_blocked !== true) {
-    diagnostics.warnings.push(
-      "Active workflow register-for-synthesis task is missing continue_on_blocked=true, so downstream planning will stop when registration is externally blocked."
-    );
-  }
-
-  if (!diagnostics.synthesis_registration_task.has_preflight_checks) {
-    diagnostics.warnings.push(
-      "Active workflow register-for-synthesis task has no preflight_checks, so dependency failures will only be detected after Codex starts."
-    );
-  }
-
-  return diagnostics;
 }
 
 function applyStateChanges({ config, runState, task, attempt, response }) {
